@@ -8,7 +8,7 @@ const versionPatch = '@@ -1,6 +1,6 @@\n {\n   "name": "gate-test-web",\n-  "vers
 const good = (over = {}) => ({
   sha: 'merge',
   release: { authorId: RELEASE_BOT_ID },
-  pr: { merged: true, mergeSha: 'merge', headRef: 'release-please--branches--main', headSha: 'head' },
+  pr: { merged: true, mergeSha: 'merge', authorId: RELEASE_BOT_ID, headRef: 'release-please--branches--main', headSha: 'head' },
   reviews: [{ userId: JAMES_ID, state: 'APPROVED', commitId: 'head' }],
   files: [
     { name: 'CHANGELOG.md', patch: '+## 0.1.1' },
@@ -29,8 +29,14 @@ test('a hand-made tag (no release, or a release by someone else) is refused', ()
 
 test('a tag on a commit that is not a merged release PR is refused', () => {
   assert.equal(decide(good({ pr: null, reviews: [], files: [] })).ok, false)
-  const ordinary = { merged: true, mergeSha: 'merge', headRef: 'feature/x', headSha: 'head' }
+  const ordinary = { merged: true, mergeSha: 'merge', authorId: RELEASE_BOT_ID, headRef: 'feature/x', headSha: 'head' }
   assert.equal(decide(good({ pr: ordinary })).ok, false)
+})
+
+test('a release-please branch PR opened by someone other than the release App is refused', () => {
+  const result = decide(good({ pr: { ...good().pr, authorId: JAMES_ID } }))
+  assert.equal(result.ok, false)
+  assert.match(result.reasons.join(' '), /not opened by the release App/)
 })
 
 test('a release PR without James’s approval at its head is refused', () => {

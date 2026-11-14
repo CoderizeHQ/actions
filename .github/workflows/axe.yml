@@ -1,0 +1,81 @@
+name: axe
+
+# The accessibility check each site's ci.yml calls on every PR:
+#   uses: CoderizeHQ/actions/.github/workflows/axe.yml@v1
+#   with: { min-pages: 5 }
+# Builds the site, serves the build the way live does, and runs axe on every built page in light and dark color
+# schemes, after the network is idle, against WCAG 2.2 AA including target size. It fails on any violation, a page
+# that doesn't answer 200, and fewer pages than expected: fewer than min-pages, or a sitemap URL with no built page.
+# No AWS and no secrets: it runs the PR's code.
+on:
+  workflow_call:
+    inputs:
+      build-dir:
+        description: Where the build writes the site
+        type: string
+        default: dist
+      min-pages:
+        description: The fewest pages the build may have
+        type: number
+        default: 1
+
+permissions:
+  contents: read
+
+jobs:
+  axe:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      # The site and the scanner in separate folders, so neither's pnpm install sees the other's workspace.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          path: site
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scanner from that same commit (its Playwright and axe versions are pinned in its lockfile).
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/axe.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of axe.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: site
+
+      - name: Build the site
+        working-directory: site
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Install the scanner and Chromium
+        working-directory: actions
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec playwright install --with-deps chromium
+
+      - name: Scan every page
+        env:
+          BUILD_DIR: site/${{ inputs.build-dir }}
+          MIN_PAGES: ${{ inputs.min-pages }}
+        run: node actions/scripts/axeScan.mjs
