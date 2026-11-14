@@ -1,0 +1,21 @@
+name: release-check
+description: Refuses a release unless the release App made it from a merged Release Please PR James approved at its head, changing only the release files.
+
+inputs:
+  ref:
+    description: The tag (or, for a hand-started test, any commit) to check
+    required: true
+  token:
+    description: A token that can read the repo's contents, pull requests and releases (the caller's GITHUB_TOKEN)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Check the release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        REPO: ${{ github.repository }}
+        REF: ${{ inputs.ref }}
+      run: node "$GITHUB_ACTION_PATH/releaseCheck.mjs"
