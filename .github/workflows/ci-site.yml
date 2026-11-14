@@ -1,0 +1,51 @@
+name: ci-site
+
+# The shared check every site repo's ci.yml calls; the `sites` ruleset requires its result from the GitHub Actions
+# app. First version, for the Phase 1 hard gate: the full checks (build, lint, gitleaks, audit, lockfile sources, axe)
+# come in Phase 3.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # No job-level `if:` here or in callers: a skipped required job counts as passing.
+  ci-site:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # Lets the hard gate make a PR fail on purpose.
+      - name: Gate-test switch
+        run: |
+          if [ -e GATE_FAIL ]; then
+            echo "::error::GATE_FAIL is present"; exit 1
+          fi
+
+      # A lockfile change with no package.json change is how a dependency gets swapped without anyone noticing.
+      # Only Renovate's own lockfile updates may do it: its App opened the PR, from a renovate/** branch (which only
+      # Renovate can write), and every commit is Renovate's.
+      - name: Lockfile changes need a package.json change
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          AUTHOR_ID: ${{ github.event.pull_request.user.id }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          renovate_id=29139614
+          renovate_email="${renovate_id}+renovate[bot]@users.noreply.github.com"
+          changed=$(git diff --name-only "$BASE...$HEAD")
+          if grep -qx 'pnpm-lock.yaml' <<<"$changed" && ! grep -qx 'package.json' <<<"$changed"; then
+            others=$(git log --format=%ae "$BASE..$HEAD" | grep -vxF "$renovate_email" || true)
+            if [ "$AUTHOR_ID" = "$renovate_id" ] && [[ "$HEAD_REF" == renovate/* ]] && [ -z "$others" ]; then
+              echo "Renovate lockfile update: allowed"
+            else
+              echo "::error::pnpm-lock.yaml changed without package.json; only Renovate's own lockfile updates may do that"
+              exit 1
+            fi
+          fi

@@ -1,0 +1,22 @@
+name: test
+
+# Unit tests for the scripts the shared checks run (the review stub's decisions, the release check's decisions).
+# Becomes part of ci-node in Phase 3.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: node --test
+        run: node --test scripts/reviewStub.test.mjs release-check/releaseCheck.test.mjs
