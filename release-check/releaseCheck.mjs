@@ -1,7 +1,7 @@
-// The first version of the `release` check (plan, Phase 1 hard gate; the deploy gate in Phase 3 builds on it).
+// The `release` check for a version tag (plan, Phase 1 hard gate; release.yml runs it before every publish to live).
 // A release passes only if:
 // - its GitHub release was made by the coderizehq-release App;
-// - the tagged commit is the squash of a merged release-please-- PR;
+// - the tagged commit is the squash of a merged release-please-- PR the release App opened;
 // - James approved that PR at its head commit;
 // - the PR changed only CHANGELOG.md, .release-please-manifest.json and the `version` line of package.json.
 // A release PR merged through James's bypass without an approval is refused on purpose.
@@ -9,12 +9,14 @@
 export const JAMES_ID = 74272118 // GilbertJames
 export const RELEASE_BOT_ID = 356725100 // coderizehq-release[bot]
 
+import { gh, ghAll } from '../scripts/lib/github.mjs'
+
 const RELEASE_FILES = new Set(['CHANGELOG.md', '.release-please-manifest.json', 'package.json'])
 
 /**
  * @param {{ sha: string,
  *   release: { authorId: number } | null,
- *   pr: { merged: boolean, mergeSha: string, headRef: string, headSha: string } | null,
+ *   pr: { merged: boolean, mergeSha: string, authorId: number, headRef: string, headSha: string } | null,
  *   reviews: { userId: number, state: string, commitId: string }[],
  *   files: { name: string, patch?: string }[] }} facts
  * @returns {{ ok: boolean, reasons: string[] }}
@@ -28,6 +30,7 @@ export function decide(facts) {
   if (!pr) reasons.push('the commit is not the merge of a pull request')
   else {
     if (!pr.merged || pr.mergeSha !== facts.sha) reasons.push('the commit is not the merge of that pull request')
+    if (pr.authorId !== RELEASE_BOT_ID) reasons.push('the pull request was not opened by the release App')
     if (!pr.headRef.startsWith('release-please--')) reasons.push('the pull request is not a Release Please PR')
     const atHead = facts.reviews.filter((r) => r.userId === JAMES_ID && r.commitId === pr.headSha)
     if (atHead.at(-1)?.state !== 'APPROVED') reasons.push('James did not approve the release PR at its head commit')
@@ -49,25 +52,12 @@ export function onlyVersionChanged(patch) {
   return changed.length > 0 && changed.every((l) => /^[+-]\s*"version":\s*"[^"]+",?\s*$/.test(l))
 }
 
-const API = 'https://api.github.com'
-
-async function gh(token, path) {
-  const res = await fetch(`${API}${path}`, {
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'x-github-api-version': '2022-11-28',
-    },
-  })
-  if (res.status === 404) return null
-  if (!res.ok) throw new Error(`GET ${path}: ${res.status}`)
-  return res.json()
-}
-
-async function main() {
-  const { GH_TOKEN: token, REPO: repo, REF: ref } = process.env
-  if (!token || !repo || !ref) throw new Error('GH_TOKEN, REPO and REF must be set')
-
+/**
+ * Reads the facts for one tag (or commit) from GitHub's API and decides. The merge commit comes from the API, not
+ * from git history, since a squash merge records it there.
+ * @returns {Promise<{ ok: boolean, reasons: string[], sha: string, tag: string, pr: number | null, approver: string | null }>}
+ */
+export async function checkRelease(token, repo, ref) {
   const commit = await gh(token, `/repos/${repo}/commits/${encodeURIComponent(ref)}`)
   if (!commit) throw new Error(`no commit for ${ref}`)
   const sha = commit.sha
@@ -79,19 +69,34 @@ async function main() {
   let reviews = []
   let files = []
   if (pull) {
-    reviews = (await gh(token, `/repos/${repo}/pulls/${pull.number}/reviews?per_page=100`)) ?? []
-    files = (await gh(token, `/repos/${repo}/pulls/${pull.number}/files?per_page=100`)) ?? []
+    reviews = await ghAll(token, `/repos/${repo}/pulls/${pull.number}/reviews`)
+    files = await ghAll(token, `/repos/${repo}/pulls/${pull.number}/files`)
   }
 
   const result = decide({
     sha,
     release: release ? { authorId: release.author?.id } : null,
     pr: pull
-      ? { merged: Boolean(pull.merged_at), mergeSha: pull.merge_commit_sha, headRef: pull.head.ref, headSha: pull.head.sha }
+      ? {
+          merged: Boolean(pull.merged_at),
+          mergeSha: pull.merge_commit_sha,
+          authorId: pull.user?.id,
+          headRef: pull.head.ref,
+          headSha: pull.head.sha,
+        }
       : null,
     reviews: reviews.map((r) => ({ userId: r.user?.id, state: r.state, commitId: r.commit_id })),
     files: files.map((f) => ({ name: f.filename, patch: f.patch })),
   })
+  const approval = reviews.filter((r) => r.user?.id === JAMES_ID && r.commit_id === pull?.head.sha).at(-1)
+  return { ...result, sha, tag, pr: pull?.number ?? null, approver: approval?.state === 'APPROVED' ? approval.user.login : null }
+}
+
+async function main() {
+  const { GH_TOKEN: token, REPO: repo, REF: ref } = process.env
+  if (!token || !repo || !ref) throw new Error('GH_TOKEN, REPO and REF must be set')
+  const result = await checkRelease(token, repo, ref)
+  const { sha, tag } = result
 
   if (result.ok) console.log(`release ${tag} (${sha}) accepted`)
   else {

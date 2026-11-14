@@ -12,7 +12,8 @@ permissions:
 jobs:
   # No job-level `if:` here or in callers: a skipped required job counts as passing.
   ci-site:
-    runs-on: ubuntu-24.04
+    # The org variable RUNNER_LABEL switches every repo between the runner VM and GitHub-hosted runners in one change.
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

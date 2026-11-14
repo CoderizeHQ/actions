@@ -1,0 +1,146 @@
+name: release
+
+# Each site's release.yml calls this for a version tag (a merged release PR) and for the weekly dependency run on main:
+#   uses: CoderizeHQ/actions/.github/workflows/release.yml@v1
+#   with: { site: sbmcdn-com }
+# Only the site name comes in. The live bucket is coderizehq-live-<site> by contract; the distribution is the one whose
+# Comment is exactly the site name (platform sets it, and the role may ListDistributions), and the domain is that
+# distribution's apex alias. So nothing about the site is kept in its own repo.
+#
+# `verify` decides through GitHub's API, with no AWS access: a version tag must be the release App's merged
+# release-please-- PR, release files only, approved by James at its final commit; a run on main must be a gap of
+# Renovate's passing lockfile-only minor and patch PRs since the last version release; anything else is refused.
+# `publish` then runs in the release environment as coderizehq-live-publish-<site> (its ARN comes from `site`), which
+# trusts only this file at v1 or v1.*: it publishes the build deploy-preview stored for that exact commit, checks it
+# on live, and records a GitHub deployment. IAM only lets it copy builds CI stored from main; that the build is the
+# release James approved is what `verify` checks.
+on:
+  workflow_call:
+    inputs:
+      site:
+        description: The site's name (its domain with dots as hyphens, as in platform/sites/<site>.json)
+        type: string
+        required: true
+      max-delete-share:
+        description: Refuse a publish that deletes more than this share of live's files (0 to 1)
+        type: string
+        default: '0.25'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+    outputs:
+      publish: ${{ steps.verify.outputs.publish }}
+      kind: ${{ steps.verify.outputs.kind }}
+      release-pr: ${{ steps.verify.outputs.release-pr }}
+      approver: ${{ steps.verify.outputs.approver }}
+      dependency-prs: ${{ steps.verify.outputs.dependency-prs }}
+      workflow-sha: ${{ steps.self.outputs.sha }}
+    steps:
+      # The name goes into role ARNs and S3 paths; coderizehq-preview-deploy-<site> must fit IAM's 64-character limit.
+      - name: Check the site name
+        env:
+          SITE: ${{ inputs.site }}
+        run: |
+          [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/release.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of release.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      # The verify step needs no packages: it uses Node's own fetch.
+      - name: Setup Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: actions
+
+      - name: Verify the release
+        id: verify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: node actions/scripts/release.mjs verify
+
+  publish:
+    needs: verify
+    # Nothing merged since the last release: verify passed with nothing to publish.
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    # The live role trusts only jobs in this environment.
+    environment: release
+    # One queue per site for releases and rollbacks: a newer run waits, a running one is never cancelled.
+    concurrency:
+      group: release-${{ inputs.site }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      deployments: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ needs.verify.outputs.workflow-sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: actions
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: actions
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-live-publish-${{ inputs.site }}
+          aws-region: us-east-1
+
+      - name: Publish to live
+        env:
+          SITE: ${{ inputs.site }}
+          MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
+          REPO: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          WORKFLOW_SHA: ${{ needs.verify.outputs.workflow-sha }}
+          KIND: ${{ needs.verify.outputs.kind }}
+          RELEASE_PR: ${{ needs.verify.outputs.release-pr }}
+          APPROVER: ${{ needs.verify.outputs.approver }}
+          DEPENDENCY_PRS: ${{ needs.verify.outputs.dependency-prs }}
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/scripts/release.mjs publish
+
+      # TODO(Phase 3): Slack and email on success and failure, as in deploy-preview.

@@ -1,0 +1,224 @@
+name: ci-tofu
+
+# The shared check platform's ci.yml calls on every PR:
+#   uses: CoderizeHQ/actions/.github/workflows/ci-tofu.yml@v1
+#   secrets: inherit
+# `check` runs tofu fmt and validate on every root, platform's unit tests (the trust-policy tests among them) and
+# gitleaks over the full history. `plan` makes a read-only plan of each root as coderizehq-infra-plan, which trusts only
+# this file at v1 or v1.*, from platform's pull requests; it can read the state but never write or lock it, so plans
+# run with -lock=false. `comment` posts every plan on the PR in one comment, updated on each push.
+#
+# A plan runs the PR's code with the plan role's read access, so that role holds nothing that can change anything.
+on:
+  workflow_call:
+    inputs:
+      roots:
+        description: JSON list of the OpenTofu roots, each with the account its resources live in
+        type: string
+        default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043"},{"root":"aws/preview","account":"798070830797"}]'
+    secrets:
+      cloudflare-read-token:
+        description: A read-only Cloudflare token (Zone DNS Read) for roots with the cloudflare provider; without it their plans are skipped
+        required: false
+      github-read-token:
+        description: A read-only GitHub token for the root with the github provider; without it that plan is skipped
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Same version and checksum as platform's tofu-root action (from tofu_1.13.9_SHA256SUMS).
+  TOFU_VERSION: 1.13.9
+  TOFU_SHA256: bc44eb6b06446ba83bd4072114891987f590f66cca712737a7f1147c50c539ce
+  # From gitleaks_8.30.1_checksums.txt on the gitleaks release page. The binary, not gitleaks-action, which needs a
+  # paid licence for organizations.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  check:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Install OpenTofu and gitleaks (checksum-verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.zip"
+          echo "${TOFU_SHA256}  tofu.zip" | sha256sum -c -
+          unzip -q -o tofu.zip tofu -d "$RUNNER_TEMP/bin"
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz -C "$RUNNER_TEMP/bin" gitleaks
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: tofu fmt
+        run: tofu fmt -check -recursive -diff
+
+      - name: tofu validate
+        env:
+          ROOTS: ${{ inputs.roots }}
+        run: |
+          failed=0
+          for root in $(jq -r '.[].root' <<<"$ROOTS"); do
+            echo "::group::$root"
+            (cd "$root" && tofu init -backend=false -input=false -no-color >/dev/null && tofu validate -no-color) || failed=1
+            echo "::endgroup::"
+          done
+          exit "$failed"
+
+      - name: Setup Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          # platform has no package.json to read a pnpm version from.
+          version: 12.15.0
+          runtime: node@24
+          install: false
+
+      # Every *.test.mjs in platform: the trust-policy tests, the routers, the not-found function.
+      - name: Unit tests
+        run: node --test
+
+      - name: gitleaks (full history)
+        run: gitleaks git --redact --no-banner --exit-code 1 .
+
+  plan:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        root: ${{ fromJSON(inputs.roots) }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_PROFILE: account
+      ROOT: ${{ matrix.root.root }}
+    steps:
+      # Written first, so the comment says so if the job dies before planning.
+      - name: Start the result
+        id: slug
+        run: |
+          echo "RESULT_DIR=$RUNNER_TEMP/plan" >> "$GITHUB_ENV"
+          RESULT_DIR=$RUNNER_TEMP/plan
+          mkdir -p "$RESULT_DIR"
+          jq -n --arg root "$ROOT" '{root: $root, status: "failed"}' > "$RESULT_DIR/result.json"
+          echo "slug=${ROOT//\//-}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Two named profiles, as in platform's apply.yml: `state` for the backend (the state bucket lets only the live
+      # account's plan role read), `account` for the root's own resources.
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-infra-plan
+          aws-region: us-east-1
+          aws-profile: state
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ matrix.root.account }}:role/coderizehq-infra-plan
+          aws-region: us-east-1
+          aws-profile: account
+
+      - name: Install OpenTofu (checksum-verified)
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o tofu.zip "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.zip"
+          echo "${TOFU_SHA256}  tofu.zip" | sha256sum -c -
+          unzip -q -o tofu.zip tofu -d "$RUNNER_TEMP/bin"
+
+      # The plan role denies every state write, the lock file included, hence -lock=false. A root whose provider
+      # needs a token it wasn't given is skipped rather than failed, and the comment says why.
+      - name: tofu plan
+        working-directory: ${{ matrix.root.root }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare-read-token }}
+          GITHUB_TOKEN: ${{ secrets.github-read-token }}
+        run: |
+          skip() {
+            jq -n --arg root "$ROOT" --arg reason "$1" '{root: $root, status: "skipped", reason: $reason}' > "$RESULT_DIR/result.json"
+            echo "::notice::$ROOT: plan skipped: $1"
+            exit 0
+          }
+          if grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            skip "needs the cloudflare-read-token secret"
+          fi
+          if grep -qE '^provider "github"' ./*.tf && [ -z "$GITHUB_TOKEN" ]; then
+            skip "needs the github-read-token secret"
+          fi
+          set +e
+          {
+            "$RUNNER_TEMP/bin/tofu" init -input=false -no-color &&
+            "$RUNNER_TEMP/bin/tofu" plan -input=false -no-color -lock=false
+          } > "$RESULT_DIR/plan.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RESULT_DIR/plan.txt"
+          status=$([ "$code" = 0 ] && echo planned || echo failed)
+          jq -n --arg root "$ROOT" --arg status "$status" '{root: $root, status: $status}' > "$RESULT_DIR/result.json"
+          exit "$code"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() }}
+        with:
+          name: plan-${{ steps.slug.outputs.slug }}
+          path: ${{ runner.temp }}/plan
+          retention-days: 7
+
+  comment:
+    needs: plan
+    # After the plans, failed or not, so a failed plan's error shows on the PR too.
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # script from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-tofu.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-tofu.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: actions
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: plan-*
+          path: ${{ runner.temp }}/plans
+
+      - name: Post the plans
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          PLANS_DIR: ${{ runner.temp }}/plans
+        run: node actions/scripts/planComment.mjs

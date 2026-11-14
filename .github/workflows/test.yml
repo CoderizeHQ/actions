@@ -1,7 +1,8 @@
 name: test
 
-# Unit tests for the scripts the shared checks run (the review stub's decisions, the release check's decisions).
-# Becomes part of ci-node in Phase 3.
+# Unit tests for the scripts the shared workflows run: the review stub, the release and dependency checks, deploy-preview
+# and release against an in-memory S3, the plan comment and axe's page handling. Also proves the lockfile installs, since
+# deploy-preview, release and axe install from it. Becomes part of ci-node in Phase 3.
 on:
   pull_request:
     branches: [main]
@@ -18,5 +19,14 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+
+      - run: pnpm install --frozen-lockfile
+
+      # Every *.test.mjs in the repo.
       - name: node --test
-        run: node --test scripts/reviewStub.test.mjs release-check/releaseCheck.test.mjs
+        run: node --test
