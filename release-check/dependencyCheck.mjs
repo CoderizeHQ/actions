@@ -14,7 +14,7 @@
 import { gh, ghAll } from '../scripts/lib/github.mjs'
 import { RELEASE_BOT_ID } from './releaseCheck.mjs'
 
-export const RENOVATE_ID = 29139614 // renovate[bot]
+export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's self-hosted Renovate App (5775623)
 
 const OK_CONCLUSIONS = new Set(['success', 'skipped', 'neutral'])
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/
