@@ -1,0 +1,238 @@
+# The secret-scan rules every shared check runs gitleaks with (ci-site, ci-node, ci-tofu): gitleaks' defaults plus
+# rules for what they miss, carried over from the CoderizeDEV fleet's config (CoderizeDEV/actions lib/gitleaks.toml,
+# 2026-11-14). A repo's own .gitleaksignore clears findings that aren't secrets; loosening a rule here loosens it for
+# every repo at once, so prefer a fingerprint in the one repo that needs it.
+#
+# Why the defaults miss secrets in .claude/settings*.json: Claude Code stores each allowed
+# command as a JSON string, so every quote inside the command is escaped (\" or \"\").
+# - generic-api-key needs [\s'"]{0,3} between the key name and the ':'/'='; a backslash
+#   breaks that, and it also needs a 10+ char value with entropy >= 3.5.
+# - stripe-access-token needs the key to END in a quote, whitespace, ';' or \n/\r. In
+#   `curl -u sk_test_...:` it ends in ':', and an escaped `\"` starts with a backslash.
+# - Resend keys and database URIs with inline passwords have no default rule at all.
+# - curl-auth-user needs `-u user:pass` with a non-empty password; `-u sk_test_...:` has none.
+#
+# Every custom rule below tolerates backslash-escaped quotes and has no terminator
+# requirement beyond "the token ends".
+
+[extend]
+useDefault = true
+
+# --- vendor tokens with a recognisable prefix -----------------------------------------
+
+[[rules]]
+id = "resend-api-key"
+description = "Resend API key"
+regex = '''\b(re_[A-Za-z0-9]{8,}_[A-Za-z0-9]{20,})(?:[^A-Za-z0-9_]|\z)'''
+secretGroup = 1
+entropy = 3
+keywords = ["re_"]
+
+[[rules]]
+id = "stripe-key-any-context"
+description = "Stripe secret/restricted key in any context (escaped JSON, curl -u key:, URLs)"
+regex = '''(?:^|[^A-Za-z0-9_])((?:sk|rk)_(?:test|live|prod)_[A-Za-z0-9]{10,247})(?:[^A-Za-z0-9]|\z)'''
+secretGroup = 1
+entropy = 2
+keywords = ["sk_test", "sk_live", "sk_prod", "rk_test", "rk_live", "rk_prod"]
+
+[[rules]]
+id = "stripe-webhook-secret"
+description = "Stripe webhook signing secret"
+regex = '''\b(whsec_[A-Za-z0-9+/=]{24,})'''
+secretGroup = 1
+entropy = 3
+keywords = ["whsec_"]
+
+[[rules]]
+id = "neon-api-key"
+description = "Neon API key"
+regex = '''\b(napi_[a-z0-9]{64})\b'''
+secretGroup = 1
+keywords = ["napi_"]
+
+[[rules]]
+id = "neon-db-password"
+description = "Neon database password"
+regex = '''\b(npg_[A-Za-z0-9]{12,})\b'''
+secretGroup = 1
+keywords = ["npg_"]
+
+[[rules]]
+id = "meta-graph-token"
+description = "Facebook / Meta Graph API access token"
+regex = '''\b(EAA[A-Za-z0-9]{100,})\b'''
+secretGroup = 1
+keywords = ["EAA"]
+
+# --- database URIs ----------------------------------------------------------------------
+
+[[rules]]
+id = "db-uri-password"
+description = "Database connection URI with an inline password (postgres, mysql, mongodb, redis, amqp)"
+regex = '''(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?)://[^:\s/@'"\\]+:([^@\s'"\\/]{3,})@'''
+secretGroup = 1
+keywords = ["postgres", "mysql", "mariadb", "mongodb", "redis", "amqp"]
+
+  # Local-only databases: the host follows the match, so check the whole line.
+  [[rules.allowlists]]
+  description = "local test hosts (user:pass@localhost)"
+  regexTarget = "line"
+  regexes = ['''(?i)://[^:\s/@'"\\]+:[^@\s'"\\/]+@(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])(?:[:/]|\b)''']
+
+# --- passwords in login bodies, curl data and env assignments ----------------------------
+
+[[rules]]
+id = "password-literal-escaped"
+description = "Password literal in a JSON/JS body, including backslash-escaped quotes inside a command string"
+regex = '''(?i)[\w.-]{0,40}?(?:passw(?:or)?d|passphrase|pwd)(?:\\*["']){0,6}\s*(?::|=>|=)\s*(?:\\*["']){1,6}([^"'\\\s<>{}]{4,128})\\*["']'''
+secretGroup = 1
+keywords = ["password", "passwd", "passphrase", "pwd"]
+
+  # Test code may hold throwaway passwords; vendor-key rules still scan these paths.
+  [[rules.allowlists]]
+  description = "test fixtures (password literals only)"
+  paths = ['''(?i)(?:^|/)(?:tests?|__tests__|__mocks__|fixtures?|e2e|cypress|playwright)/|\.(?:test|spec)\.[cm]?[jt]sx?$''']
+
+[[rules]]
+id = "password-form-or-env"
+description = "password=VALUE in curl form data, a URL query, a shell/env assignment"
+regex = '''(?i)(?:^|[\s&?"'\\(])[\w.-]{0,40}?passw(?:or)?d=([^&\s"'\\<>{}()\[\],;]{4,128})(?:[&\s"'\\;)]|\z)'''
+secretGroup = 1
+keywords = ["password=", "passwd="]
+
+# --- AWS keys and generic secrets inside escaped strings ---------------------------------
+
+[[rules]]
+id = "aws-secret-access-key"
+description = "AWS secret access key next to an aws/secret key name, quotes escaped or not"
+regex = '''(?i)aws.{0,20}?(?:secret|sk).{0,20}?[\\"'\s:=]{1,8}([A-Za-z0-9/+]{40})(?:[^A-Za-z0-9/+=]|\z)'''
+secretGroup = 1
+entropy = 4
+keywords = ["aws"]
+
+[[rules]]
+id = "aws-access-key-id-escaped"
+description = "AWS access key ID right after an escape sequence (\\n, \\t, \\r), where the default rule's \\b fails"
+regex = '''\\[nrt]((?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16})\b'''
+secretGroup = 1
+entropy = 3
+keywords = ["akia", "asia", "abia", "acca", "a3t"]
+
+[[rules]]
+id = "secret-kv-escaped-json"
+description = "secret/token/api key value inside a JSON string with backslash-escaped quotes"
+regex = '''(?i)[\w.-]{0,40}?(?:secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|auth[_-]?key|credentials?)[\w.-]{0,20}\\+["'](?:\\*["']){0,5}\s*(?::|=)\s*\\+["'](?:\\*["']){0,5}([^"'\\\s]{12,512})\\+["']'''
+secretGroup = 1
+entropy = 3.3
+keywords = ["secret", "token", "key", "credential"]
+
+[[rules]]
+id = "secret-env-assignment"
+description = "SECRET/TOKEN/API_KEY/PASSWORD env var assigned inline (shell command, .env, escaped JSON), any terminator"
+regex = '''(?:^|[^A-Za-z0-9_])([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|PASSWORD|PASSWD)[A-Z0-9_]*)=\\*["']?([A-Za-z0-9_+=.-][A-Za-z0-9_+=.@!%*#-]{7,255})'''
+secretGroup = 2
+entropy = 3
+keywords = ["SECRET", "TOKEN", "API_KEY", "APIKEY", "ACCESS_KEY", "PRIVATE_KEY", "PASSWORD", "PASSWD"]
+
+[[rules]]
+id = "env-fallback-literal"
+description = "Hard-coded fallback for a secret env var: password = process.env.X || 'literal' (also ?? and os.environ.get)"
+regex = '''(?i)(?:passw(?:or)?d|passphrase|secret|token|api[_-]?key|apikey|private[_-]?key)\w*\s*(?::|=)\s*(?:process\.env\.\w+|process\.env\[['"]\w+['"]\]|os\.environ\.get\(['"]\w+['"])\s*(?:\|\||\?\?|,)\s*['"]([^'"\s]{6,256})['"]'''
+secretGroup = 1
+keywords = ["process.env", "os.environ"]
+
+  # TOKEN_URL / SECRET_NAME / API_KEY_HEADER etc. hold config, not credentials.
+  [[rules.allowlists]]
+  description = "URLs, paths and names, not credentials"
+  condition = "OR"
+  regexTarget = "match"
+  regexes = [
+    '''(?i)^\w*(?:url|uri|endpoint|path|host|name|header|prefix|cookie|file|dir|region|issuer|audience|algorithm|alg|type|mode)\s*(?::|=)''',
+    '''['"](?:[a-z][a-z0-9+.-]*:)?//''',
+    '''['"]/''',
+  ]
+
+[[rules]]
+id = "dmarc-ws-api-key"
+description = "dmarc.ws API key (dmrc_ + 64 hex), the fleet's own product key format"
+regex = '''\b(dmrc_[0-9a-f]{64})\b'''
+secretGroup = 1
+keywords = ["dmrc_"]
+
+[[rules]]
+id = "mysql-cli-password"
+description = "mysql/mysqldump -pPASSWORD on a command line"
+regex = '''\bmysql(?:dump|admin)?\b[^\n]{0,80}?\s-p([^\s"'\\-][^\s"'\\]{3,64})'''
+secretGroup = 1
+keywords = ["mysql"]
+
+# --- allowlists -------------------------------------------------------------------------
+
+[[allowlists]]
+description = "example env files and local env docs hold placeholders only"
+paths = [
+  '''(?i)(?:^|/)\.?env(?:\.[\w-]+)*\.(?:example|sample|template|dist|defaults)$''',
+  '''(?i)(?:^|/)example\.env$''',
+]
+
+[[allowlists]]
+description = "placeholder values for the custom rules (secret target, anchored)"
+targetRules = [
+  "resend-api-key", "stripe-key-any-context", "stripe-webhook-secret", "db-uri-password",
+  "password-literal-escaped", "password-form-or-env", "aws-secret-access-key",
+  "secret-kv-escaped-json", "secret-env-assignment", "mysql-cli-password", "env-fallback-literal",
+]
+regexTarget = "secret"
+regexes = [
+  '''(?i)^(?:password|passw0rd|pass|pwd|passwd|changeme|change[-_]?me|changeit|change[-_]?this|secret|secrets?123|test|testing|tester|test123|example|sample|dummy|placeholder|fake|foo|bar|foobar|admin|admin123|root|postgres|mysql|user|username|redacted|none|null|undefined|empty|todo|tbd|hunter2|123456|1234|12345678|password1|password123|letmein|qwerty|secretpassword|mypassword|yourpassword|supersecret|s3cr3t)$''',
+  '''(?i)^(?:your|my|enter|insert|replace)[-_ .]?(?:own[-_ .]?)?(?:db[-_ .]?|database[-_ .]?|admin[-_ .]?|app[-_ .]?)?(?:password|passwd|pass|pwd|secret|token|key|api[-_]?key|value|stripe|resend)\w*$''',
+  '''(?i)^(?:string|text|number|boolean|required|optional|hidden|current-password|new-password|confirm|confirmpassword|invalid|wrong|wrongpassword|incorrect|correct|valid|validpassword|newpassword|oldpassword)$''',
+  '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''',
+  '''^\$\(''',
+  '''(?i)(?:example|placeholder|dummy|redacted|changeme|change[-_]me|xxxx|\*\*\*|<|>|\.\.\.)''',
+  '''^[xX*.#_-]{3,}$''',
+  '''^(?:x+|X+)$''',
+]
+
+[[allowlists]]
+description = "template / variable interpolation, not a literal value"
+targetRules = [
+  "db-uri-password", "password-literal-escaped", "password-form-or-env",
+  "secret-kv-escaped-json", "secret-env-assignment",
+]
+regexTarget = "match"
+regexes = [
+  '''://[^:]+:x@''',
+  '''%[A-Za-z_][A-Za-z0-9_]*%''',
+  '''\{\{[^}]*\}\}''',
+  '''(?i)process\.env''',
+]
+
+# --- CI additions -----------------------------------------------------------------------
+
+# Files that must never be committed, whatever they hold: .env files (only .env.example is),
+# and Claude Code's per-machine settings.local.json, which records approved commands verbatim.
+[[rules]]
+id = "committed-claude-local-settings"
+description = "Committed .claude/settings.local.json (per-machine allowlist; records approved commands verbatim)"
+path = '''(?:^|/)\.claude/settings\.local\.json$'''
+
+[[rules]]
+id = "committed-env-file"
+description = "Committed .env / .env.<stage> file (only .env.example may be committed)"
+path = '''(?:^|/)\.env(?:\.(?:local|development|dev|production|prod|staging|test)(?:\.local)?)?$'''
+
+# IndexNow keys are public by design (served at /<key>.txt).
+[[allowlists]]
+description = "IndexNow key"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = ['''(?i)indexnow|keyLocation''']
+
+# Fake Stripe keys in CI env / tests: sk_test_ followed by lowercase words, never a real key shape.
+[[allowlists]]
+description = "fake Stripe keys made of lowercase words"
+targetRules = ["stripe-access-token", "stripe-key-any-context"]
+regexTarget = "secret"
+regexes = ['''^(?:sk|rk)_(?:test|live)_[a-z]+(?:_[a-z]+)*$''']

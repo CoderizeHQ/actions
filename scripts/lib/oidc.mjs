@@ -8,12 +8,17 @@ export function decodeClaims(jwt) {
   return JSON.parse(Buffer.from(part, 'base64url').toString('utf8'))
 }
 
-export async function requestClaims(audience = 'sts.amazonaws.com') {
+/** The job's OIDC token itself (a JWT), for code that hands it to AWS. */
+export async function requestToken(audience = 'sts.amazonaws.com') {
   const { ACTIONS_ID_TOKEN_REQUEST_URL: url, ACTIONS_ID_TOKEN_REQUEST_TOKEN: bearer } = process.env
   if (!url || !bearer) throw new Error('no OIDC token available (the job needs id-token: write)')
   const res = await fetch(`${url}&audience=${encodeURIComponent(audience)}`, { headers: { authorization: `bearer ${bearer}` } })
   if (!res.ok) throw new Error(`OIDC token request: ${res.status}`)
-  return decodeClaims((await res.json()).value)
+  return (await res.json()).value
+}
+
+export async function requestClaims(audience = 'sts.amazonaws.com') {
+  return decodeClaims(await requestToken(audience))
 }
 
 /**
