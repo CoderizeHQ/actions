@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/CoderizeHQ/actions/compare/v1.0.2...v1.0.3) (2026-11-15)
+
+
+### Bug Fixes
+
+* run the live trust tests on the base branch's site records, so a new site's PR passes before its roles exist ([#12](https://github.com/CoderizeHQ/actions/issues/12)) ([7ff0051](https://github.com/CoderizeHQ/actions/commit/7ff005188286cde81ad362a958b0b0d5346fb40d))
+
 ## [1.0.2](https://github.com/CoderizeHQ/actions/compare/v1.0.1...v1.0.2) (2026-11-15)
 
 
