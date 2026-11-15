@@ -262,19 +262,27 @@ jobs:
           if grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             skip "needs the CLOUDFLARE_READ_TOKEN secret"
           fi
-          if grep -qE '^provider "github"' ./*.tf && [ -z "$GITHUB_TOKEN" ]; then
-            skip "needs the PLATFORM_READ_APP_KEY secret and the PLATFORM_READ_APP_CLIENT_ID variable"
+          # A read-only App can't read org rulesets (403) or repositories' merge settings (they need contents write),
+          # so a root with the github provider plans against its last applied state instead of live GitHub: exactly
+          # what the PR changes. Hand-made changes to GitHub settings show in the plan apply.yml runs on every merge.
+          refresh=()
+          note=""
+          if grep -qE '^provider "github"' ./*.tf; then
+            [ -n "$GITHUB_TOKEN" ] || skip "needs the PLATFORM_READ_APP_KEY secret and the PLATFORM_READ_APP_CLIENT_ID variable"
+            refresh=(-refresh=false)
+            note="against the last applied state; live GitHub settings aren't read"
           fi
           set +e
           {
             "$RUNNER_TEMP/bin/tofu" init -input=false -no-color &&
-            "$RUNNER_TEMP/bin/tofu" plan -input=false -no-color -lock=false
+            "$RUNNER_TEMP/bin/tofu" plan -input=false -no-color -lock=false "${refresh[@]}"
           } > "$RESULT_DIR/plan.txt" 2>&1
           code=$?
           set -e
           cat "$RESULT_DIR/plan.txt"
           status=$([ "$code" = 0 ] && echo planned || echo failed)
-          jq -n --arg root "$ROOT" --arg status "$status" '{root: $root, status: $status}' > "$RESULT_DIR/result.json"
+          jq -n --arg root "$ROOT" --arg status "$status" --arg note "$note" \
+            '{root: $root, status: $status} + (if $note == "" then {} else {note: $note} end)' > "$RESULT_DIR/result.json"
           exit "$code"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
