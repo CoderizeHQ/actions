@@ -1,0 +1,20 @@
+name: ci
+
+# actions' own checks on every PR: ci-node, called by path so the PR's own version of the checks runs. Its tests are
+# every *.test.mjs here (the review stub, the release and dependency checks, deploy-preview and release against an
+# in-memory S3, the plan comment, axe's page handling and the ci-site, audit and trust-test scripts), and the install
+# proves the lockfile installs, since deploy-preview, release and axe install from it.
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci-node.yml
+    permissions:
+      contents: read
+      actions: read

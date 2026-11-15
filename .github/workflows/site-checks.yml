@@ -1,0 +1,34 @@
+name: site-checks
+
+# The checks the `sites` ruleset makes every site PR run (plan, Phase 3 "Shared workflows"): platform's
+# tofu/rulesets.tf names this file, at refs/tags/v1, in the ruleset's "Require workflows to pass". GitHub runs it from
+# here in the site repo's context, whatever the PR does to the site's own workflow files, and no PR merges until it
+# passes. The ruleset also requires each job's result by name from the GitHub Actions app: "ci / ci-site" and
+# "axe / axe". Site repos have no ci.yml of their own.
+#
+# A ruleset workflow takes no inputs, so ci-site and axe run with their defaults (the build in dist/, at least one
+# page; axe also fails on any sitemap URL with no built page).
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # GitHub also runs a ruleset workflow's pull_request trigger in the repo that holds it; the `if` keeps these off
+  # actions' own PRs. It's never false in a site repo, so it can't skip a required check there.
+  ci:
+    if: github.repository != 'CoderizeHQ/actions'
+    uses: CoderizeHQ/actions/.github/workflows/ci-site.yml@v1
+    permissions:
+      contents: read
+      actions: read
+
+  # Every built page in light and dark color schemes (WCAG 2.2 AA, target size included). `actions: read` lets both
+  # find which commit of their workflow the run uses and load their scripts from it.
+  axe:
+    if: github.repository != 'CoderizeHQ/actions'
+    uses: CoderizeHQ/actions/.github/workflows/axe.yml@v1
+    permissions:
+      contents: read
+      actions: read
