@@ -1,5 +1,6 @@
-// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, so the tests
-// (and a dry run) hand them an in-memory fake instead. Credentials come from configure-aws-credentials.
+// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, and notify.mjs
+// a `mailer`, so the tests (and a dry run) hand them an in-memory fake instead. Credentials come from
+// configure-aws-credentials.
 
 import { CloudFrontClient, CreateInvalidationCommand, ListDistributionsCommand, waitUntilInvalidationCompleted } from '@aws-sdk/client-cloudfront'
 import {
@@ -11,6 +12,7 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
+import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2'
 
 import { sha256Base64ToHex, sha256HexToBase64 } from './files.mjs'
 
@@ -141,6 +143,30 @@ export function awsStore() {
         }),
       )
       return res.Invalidation?.Id
+    },
+  }
+}
+
+// SES in the live account, as coderizehq-notify-send. Plain text only: nothing from a run is ever rendered as HTML.
+export function awsMailer() {
+  const ses = new SESv2Client({ region: REGION })
+  return {
+    /** @returns {Promise<string>} the SES message id */
+    async send({ from, to, configurationSet, subject, text }) {
+      const res = await ses.send(
+        new SendEmailCommand({
+          FromEmailAddress: from,
+          Destination: { ToAddresses: [to] },
+          ConfigurationSetName: configurationSet,
+          Content: {
+            Simple: {
+              Subject: { Data: subject, Charset: 'UTF-8' },
+              Body: { Text: { Data: text, Charset: 'UTF-8' } },
+            },
+          },
+        }),
+      )
+      return res.MessageId
     },
   }
 }

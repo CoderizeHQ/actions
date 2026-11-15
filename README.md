@@ -18,8 +18,8 @@ pinned to `v1.2.3` runs `v1.2.3`'s scripts. Jobs that do that need `actions: rea
 | --- | --- | --- | --- | --- |
 | `ci-site.yml` | every site PR | none | `contents: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `axe.yml` | every site PR | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | None: no AWS, no secrets. Runs the PR's code |
-| `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main |
-| `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main |
+| `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
+| `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
 | `ci-tofu.yml` | every platform PR | `roots` (platform's three); secrets `cloudflare-read-token`, `github-read-token` (both optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
 
 Role ARNs are always derived from `site` (`arn:aws:iam::798070830797:role/coderizehq-preview-deploy-<site>`,
@@ -41,6 +41,7 @@ to 38 of `a-z`, `0-9` and `-` (the role names must fit IAM's 64 characters).
      deletes what the build no longer has inside `sites/<site>/` only, and refuses to delete more than
      `max-delete-share` of the files (deleting 10 or fewer always passes);
    - invalidates `/sites/<site>/*` on the preview distribution only when something changed, and waits for it.
+3. `notify` (only when `build` or `deploy` failed): emails ops@coderize.dev (see Notifications).
 
 ### release
 
@@ -66,6 +67,45 @@ to 38 of `a-z`, `0-9` and `-` (the role names must fit IAM's 64 characters).
    - invalidates `/*` and waits, then checks the live home page and robots.txt are this build's bytes, robots.txt
      doesn't block every crawler and names a sitemap on the site's own host, and the sitemap answers;
    - marks the deployment successful, or failed with the reason.
+3. `notify`: emails ops@coderize.dev when `publish` succeeded, or when `verify` or `publish` failed (a refusal
+   included, with its reasons). Nothing is sent when there was nothing to publish, or for a run on a ref release can
+   never take (neither a version tag nor main).
+
+### Notifications
+
+Email only (James's call, C955 a), to ops@coderize.dev, from `CoderizeHQ <notify@notify.coderize.dev>` through SES in
+the live account with the `coderizehq-notify` configuration set (bounces and complaints go to platform's feedback
+topic). The `notify` jobs run `scripts/notify.mjs` as `arn:aws:iam::243891826043:role/coderizehq-notify-send`, fixed in
+the workflows. platform's `aws/live/notify.tf` makes that role: it trusts only `deploy-preview.yml` and `release.yml`
+at `v1`/`v1.*`, from a site repo (by id, from the site records) on main or a version tag, and may only call
+`ses:SendEmail` from that address to that one recipient. The email is plain text: the site, ref, commit, each job's
+result, the live URL and approval for a release, a refusal's reasons, and the run's link.
+
+## Versions: releases, the canary and `v1`
+
+Each merge to main is released by Release Please (`release-please-config.json`, `.release-please-manifest.json`),
+which platform's `release-bootstrap` workflow runs for this repo as the release App: it keeps a `chore(main): release
+1.x.y` PR open, and once James merges it, tags `v1.x.y` and makes the GitHub release. So PR titles here are
+Conventional Commits (`feat:`, `fix:`; `feat!:` would be v2): the squash commit is what Release Please reads.
+
+`v1` (what every site calls) moves only through `release-bootstrap`'s `tag-actions` job, and only to the newest
+`v1.x.y` release after the canary passed for it:
+
+1. A platform PR names the release in `release/canary.json`. Applying it rewrites `deploy-preview.yml` in each canary
+   site (records with `"group": "canary"`) to call `deploy-preview.yml@v1.x.y`, and that commit runs it: a fresh build,
+   stored and published to the site's preview by the candidate. The roles trust `@refs/tags/v1.*`, so nothing else
+   changes.
+2. `release-bootstrap`'s `canary` job (every 15 minutes) reads each canary site's deploy-preview runs that used the
+   release's commit and sets the commit status `canary` on that commit here, as the release App: `success` when every
+   canary site's latest such run passed, `failure` when any failed, `pending` until each has one.
+3. `tag-actions` (James starts it) moves `v1` to the newest release's commit only if that release passes `release-check`
+   (the code at the current `v1`), and its latest `canary` status from the release App is `success`. A failure, or
+   no result yet, leaves `v1` where it is.
+
+Moving `v1` back is `release-bootstrap`'s `rollback-actions` job: `v1` goes to the release before the one it points
+at, and that release's `canary` status is set to `failure` (rolled back) so `tag-actions` won't move forward to it
+again; the fix ships as a newer release. Moving `v1` redeploys nothing: platform's `docs/release-safety.md` has the
+urgent-fix steps and the refusal drills.
 
 ### ci-tofu
 
@@ -90,12 +130,13 @@ on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, 
 | `.github/workflows/review-stub.yml`, `scripts/reviewStub.mjs` | The `review` check until the review service (Phase 5): every 5 minutes, as the `coderizehq-reviewer` App, from the `review` environment (main only) |
 | `.github/workflows/test.yml` | Every `*.test.mjs`, including dry runs of deploy-preview and release against an in-memory S3 (`scripts/lib/memoryStore.mjs`) |
 
-`v1` is moved only by `platform`'s `release-bootstrap` workflow (James starts it), as the release App; the `tags`
-ruleset refuses everyone else.
+`v1` is moved only by `platform`'s `release-bootstrap` workflow (James starts it), as the release App, after the canary
+(see Versions); the `tags` ruleset refuses everyone else.
 
 ## Not done yet
 
-- Slack and email on deploy and release results: no webhook or sender exists yet (TODOs in both workflows).
+- The canary covers `deploy-preview` only; `release.yml`, `ci-site` and `axe` on the canary channel come later
+  (platform's `docs/release-safety.md`).
 - ci-tofu's plans of roots that use the Cloudflare or GitHub provider need read-only tokens passed as
   `cloudflare-read-token` and `github-read-token`; until then those plans are skipped.
 - The runner VM (Phase 3): jobs need `gh`, `jq`, `curl`, `unzip` and, for axe, Playwright's system packages
