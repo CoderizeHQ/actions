@@ -24,6 +24,13 @@ test('the comment starts with the marker, lists roots in order and fences each p
   assert.equal(body.split('```').length - 1, 4, "a plan's own fences can't break out")
 })
 
+test("a root's note shows under its heading", () => {
+  const tofu = { result: { root: 'tofu', status: 'planned', note: "against the last applied state; live GitHub settings aren't read" }, text: 'No changes.' }
+  const body = formatComment([tofu, plan('aws/live', 'planned', 'No changes.')], 'a'.repeat(40))
+  assert.match(body, /#### `tofu`: No changes\.\n\nPlanned against the last applied state; live GitHub settings aren't read\./)
+  assert.equal(body.match(/Planned against/g).length, 1, 'only the root with a note')
+})
+
 test('a huge plan is cut from the front to fit a comment', () => {
   const huge = `${'x'.repeat(200_000)}\nPlan: 9 to add, 0 to change, 0 to destroy.`
   const body = formatComment([plan('tofu', 'planned', huge), plan('aws/live', 'planned', 'No changes.')], 'a'.repeat(40))

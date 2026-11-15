@@ -19,7 +19,7 @@ export function headline(result, text) {
 }
 
 /**
- * @param {{ result: { root: string, status: 'planned' | 'failed' | 'skipped', reason?: string }, text: string }[]} plans
+ * @param {{ result: { root: string, status: 'planned' | 'failed' | 'skipped', reason?: string, note?: string }, text: string }[]} plans
  * @param {string} sha
  */
 export function formatComment(plans, sha) {
@@ -29,6 +29,7 @@ export function formatComment(plans, sha) {
   for (const { result, text } of sorted) {
     parts.push('', `#### \`${result.root}\`: ${headline(result, text)}`)
     if (result.status === 'skipped') continue
+    if (result.note) parts.push('', `Planned ${result.note}.`)
     let body = text.replaceAll('```', '`​``').trim()
     if (body.length > budget) body = `…(${body.length - budget} characters cut; the full plan is in the job log)\n${body.slice(-budget)}`
     parts.push('', '<details><summary>Show plan</summary>', '', '```text', body, '```', '', '</details>')
