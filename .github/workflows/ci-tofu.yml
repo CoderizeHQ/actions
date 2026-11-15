@@ -85,7 +85,7 @@ jobs:
         with:
           # platform has no package.json to read a pnpm version from.
           version: 12.15.0
-          runtime: node@24
+          runtime: node@26
           install: false
 
       # Every *.test.mjs in platform: the trust-policy tests, the routers, the not-found function, the site records.
@@ -180,7 +180,7 @@ jobs:
       - name: Setup Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: .ci-tofu-actions
 
@@ -327,7 +327,7 @@ jobs:
       - name: Setup Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: actions
 
