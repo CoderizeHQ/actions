@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.4](https://github.com/CoderizeHQ/actions/compare/v1.0.3...v1.0.4) (2026-11-15)
+
+
+### Bug Fixes
+
+* trust CoderizeHQ's self-hosted Renovate App ([#14](https://github.com/CoderizeHQ/actions/issues/14)) ([6907586](https://github.com/CoderizeHQ/actions/commit/6907586731f8fa00c633eb1d24b151426da7f4db))
+* use the preset path syntax for the Renovate policy ([#15](https://github.com/CoderizeHQ/actions/issues/15)) ([8af67b8](https://github.com/CoderizeHQ/actions/commit/8af67b842d098f9d3e869c3e4b202d30a4512713))
+
 ## [1.0.3](https://github.com/CoderizeHQ/actions/compare/v1.0.2...v1.0.3) (2026-11-15)
 
 
