@@ -70,9 +70,16 @@ jobs:
 
       - name: Install the scanner and Chromium
         working-directory: actions
+        # The runner VM's job image already has Chromium's system libraries and no way to root
+        # (CoderizeHQ/runners, PLAYWRIGHT_VERSION: keep it on this lockfile's Playwright), so only a GitHub-hosted
+        # runner installs them.
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec playwright install --with-deps chromium
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            pnpm exec playwright install --with-deps chromium
+          else
+            pnpm exec playwright install chromium
+          fi
 
       - name: Scan every page
         env:
