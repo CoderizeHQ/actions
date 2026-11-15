@@ -7,7 +7,7 @@
 // with write access can edit those). actions is public, so this logs counts only, never repo names or PR titles.
 
 export const JAMES_ID = 74272118 // GilbertJames
-export const RENOVATE_ID = 29139614 // renovate[bot]
+export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's self-hosted Renovate App (5775623)
 export const REVIEWER_APP_ID = 5761471 // coderizehq-reviewer
 
 // The same paths each site's CODEOWNERS gives James (plan, Phase 1 "Merge rules").

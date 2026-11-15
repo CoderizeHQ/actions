@@ -104,8 +104,9 @@ jobs:
           AUTHOR_ID: ${{ github.event.pull_request.user.id }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
-          renovate_id=29139614
-          renovate_email="${renovate_id}+renovate[bot]@users.noreply.github.com"
+          # coderizehq-renovate[bot], CoderizeHQ's self-hosted Renovate App (5775623)
+          renovate_id=357122915
+          renovate_email="${renovate_id}+coderizehq-renovate[bot]@users.noreply.github.com"
           changed=$(git diff --name-only "$BASE...$HEAD")
           if grep -qx 'pnpm-lock.yaml' <<<"$changed" && ! grep -qx 'package.json' <<<"$changed"; then
             others=$(git log --format=%ae "$BASE..$HEAD" | grep -vxF "$renovate_email" || true)
