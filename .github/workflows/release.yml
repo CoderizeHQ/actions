@@ -44,6 +44,7 @@ jobs:
       release-pr: ${{ steps.verify.outputs.release-pr }}
       approver: ${{ steps.verify.outputs.approver }}
       dependency-prs: ${{ steps.verify.outputs.dependency-prs }}
+      reasons: ${{ steps.verify.outputs.reasons }}
       workflow-sha: ${{ steps.self.outputs.sha }}
     steps:
       # The name goes into role ARNs and S3 paths; coderizehq-preview-deploy-<site> must fit IAM's 64-character limit.
@@ -105,6 +106,8 @@ jobs:
       contents: read
       deployments: write
       id-token: write
+    outputs:
+      site-url: ${{ steps.publish.outputs.site-url }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -129,6 +132,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Publish to live
+        id: publish
         env:
           SITE: ${{ inputs.site }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
@@ -143,4 +147,69 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node actions/scripts/release.mjs publish
 
-      # TODO(Phase 3): Slack and email on success and failure, as in deploy-preview.
+  # Emails ops@coderize.dev when a release publishes, and when it fails or is refused (email only, C955 a). Nothing is
+  # sent when there was nothing to publish, or for a hand-started run on a ref the release can never take (neither a
+  # version tag nor main), which coderizehq-notify-send doesn't trust. That role (live account) may only send from
+  # notify@notify.coderize.dev to ops@ with the coderizehq-notify configuration set, and trusts only this file and
+  # deploy-preview.yml at v1 or v1.*; its ARN is fixed here, never an input.
+  notify:
+    needs: [verify, publish]
+    if: >-
+      always() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      (needs.publish.result == 'success' || contains(needs.*.result, 'failure'))
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      # verify's own answer isn't there if verify failed before finding it, so ask again.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/release.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of release.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: actions
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: actions
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-notify-send
+          aws-region: us-east-1
+
+      - name: Email ops@
+        env:
+          WORKFLOW: release
+          SITE: ${{ inputs.site }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          RESULTS: verify=${{ needs.verify.result }},publish=${{ needs.publish.result }}
+          KIND: ${{ needs.verify.outputs.kind }}
+          RELEASE_PR: ${{ needs.verify.outputs.release-pr }}
+          APPROVER: ${{ needs.verify.outputs.approver }}
+          DEPENDENCY_PRS: ${{ needs.verify.outputs.dependency-prs }}
+          REASONS: ${{ needs.verify.outputs.reasons }}
+          SITE_URL: ${{ needs.publish.outputs.site-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/scripts/notify.mjs

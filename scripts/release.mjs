@@ -246,6 +246,8 @@ async function verifyMain() {
   }
   if (!result.publish) {
     for (const r of result.reasons) console.log(`::error::${r}`)
+    // For the email (notify.mjs): one line, since a step output is one line.
+    output('reasons', result.reasons.join('; ').replace(/\s+/g, ' '))
     summary(`### Release refused\n\n${result.reasons.map((r) => `- ${r}`).join('\n')}`)
     process.exit(1)
   }
@@ -273,6 +275,7 @@ async function publishMain() {
   const { awsStore } = await import('./lib/aws.mjs')
   const store = awsStore()
   const { distributionId, domain } = await findLive(store, site)
+  output('site-url', `https://${domain}`)
 
   const base = {
     kind: env.KIND,

@@ -144,6 +144,59 @@ jobs:
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
         run: node actions/scripts/deployPreview.mjs
 
-      # TODO(Phase 3): Slack and email on success and failure. No webhook or sender exists for CoderizeHQ yet; when
-      # they do, add a notify job here (`needs: [build, deploy]`, `if: always()`) that reads them from the caller's
-      # secrets, so a site's workflow stays one `uses:` line.
+  # Emails ops@coderize.dev when the build or the deploy fails (email only, C955 a; a passing preview sends nothing).
+  # It runs as coderizehq-notify-send in the live account, which may only send from notify@notify.coderize.dev to ops@
+  # with the coderizehq-notify configuration set, and trusts only this file and release.yml at v1 or v1.*, from a site
+  # repo's main or a version tag. Its ARN is fixed here, never an input, so a site's workflow stays one `uses:` line.
+  notify:
+    needs: [build, deploy]
+    if: always() && contains(needs.*.result, 'failure') && github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/deploy-preview.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of deploy-preview.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: actions
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: actions
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-notify-send
+          aws-region: us-east-1
+
+      - name: Email ops@
+        env:
+          WORKFLOW: deploy-preview
+          SITE: ${{ inputs.site }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          RESULTS: build=${{ needs.build.result }},deploy=${{ needs.deploy.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node actions/scripts/notify.mjs
