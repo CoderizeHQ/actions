@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/CoderizeHQ/actions/compare/v1.0.1...v1.0.2) (2026-11-15)
+
+
+### Bug Fixes
+
+* plan the github root against its applied state, since a read-only App can't read rulesets or merge settings ([#10](https://github.com/CoderizeHQ/actions/issues/10)) ([23069c6](https://github.com/CoderizeHQ/actions/commit/23069c6e5ced1232a540b0282fa29aae7aab9378))
+
 ## [1.0.1](https://github.com/CoderizeHQ/actions/compare/v1.0.0...v1.0.1) (2026-11-15)
 
 
