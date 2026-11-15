@@ -1,14 +1,18 @@
 name: ci-tofu
 
-# The shared check platform's ci.yml calls on every PR:
-#   uses: CoderizeHQ/actions/.github/workflows/ci-tofu.yml@v1
-#   secrets: inherit
-# `check` runs tofu fmt and validate on every root, platform's unit tests (the trust-policy tests among them) and
-# gitleaks over the full history. `plan` makes a read-only plan of each root as coderizehq-infra-plan, which trusts only
-# this file at v1 or v1.*, from platform's pull requests; it can read the state but never write or lock it, so plans
-# run with -lock=false. `comment` posts every plan on the PR in one comment, updated on each push.
+# The checks on every platform PR (plan, Phase 3 "Shared workflows", ci-tofu). platform-checks.yml runs it through
+# the `platform` ruleset's "Require workflows to pass", so a PR can't change or skip it by editing platform's own
+# workflow files.
 #
-# A plan runs the PR's code with the plan role's read access, so that role holds nothing that can change anything.
+# `check` runs the PR-title check, tofu fmt and validate on every root, platform's unit tests (the trust-policy tests
+# among them) and gitleaks over the full history. `trust` runs the live negative trust tests: the job's own OIDC token
+# must be refused by every site role and by coderizehq-infra-deploy (scripts/trustProbe.mjs says which refusal each
+# attempt proves). `plan` makes a read-only plan of each root as coderizehq-infra-plan, which trusts only this file
+# at v1 or v1.*, from platform's pull requests; it can read the state but never write or lock it, so plans run with
+# -lock=false. `comment` posts every plan on the PR in one comment, updated on each push.
+#
+# A plan runs the PR's code with the plan role's read access, so that role holds nothing that can change anything,
+# and the two credentials it gets are read-only: a Cloudflare token and the coderizehq-platform-read App.
 on:
   workflow_call:
     inputs:
@@ -16,12 +20,14 @@ on:
         description: JSON list of the OpenTofu roots, each with the account its resources live in
         type: string
         default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043"},{"root":"aws/preview","account":"798070830797"}]'
+    # Named like the caller's repository secrets, so a caller can pass them one by one or with `secrets: inherit`.
+    # The read App's client id is the caller's PLATFORM_READ_APP_CLIENT_ID variable.
     secrets:
-      cloudflare-read-token:
-        description: A read-only Cloudflare token (Zone DNS Read) for roots with the cloudflare provider; without it their plans are skipped
+      CLOUDFLARE_READ_TOKEN:
+        description: A read-only Cloudflare token (Zone Read, DNS Read) for roots with the cloudflare provider; without it their plans are skipped
         required: false
-      github-read-token:
-        description: A read-only GitHub token for the root with the github provider; without it that plan is skipped
+      PLATFORM_READ_APP_KEY:
+        description: The coderizehq-platform-read App's private key, for the root with the github provider; without it that plan is skipped
         required: false
 
 permissions:
@@ -39,6 +45,9 @@ env:
 jobs:
   check:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,12 +88,104 @@ jobs:
           runtime: node@24
           install: false
 
-      # Every *.test.mjs in platform: the trust-policy tests, the routers, the not-found function.
+      # Every *.test.mjs in platform: the trust-policy tests, the routers, the not-found function, the site records.
+      # Before the scripts are checked out below, so their tests aren't picked up here.
       - name: Unit tests
         run: node --test
 
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts and the gitleaks rules from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-tofu.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-tofu.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: .ci-tofu-actions
+          persist-credentials: false
+
+      - name: PR title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node .ci-tofu-actions/scripts/prTitle.mjs
+
+      # Scans platform's history only: the scripts' checkout is a separate repository inside the workspace.
       - name: gitleaks (full history)
-        run: gitleaks git --redact --no-banner --exit-code 1 .
+        run: gitleaks git --redact --no-banner --exit-code 1 --config .ci-tofu-actions/config/gitleaks.toml .
+
+  # The live negative trust tests (plan, Phase 2 "Who can change what"): this job's OIDC token, a platform PR running
+  # ci-tofu.yml, must be refused by every role it must never reach, each refusal an AccessDenied from STS for a role
+  # that exists. platform's trust.test.mjs proves each condition alone against the templates; this proves the deployed
+  # policies. The control: the same token must assume coderizehq-infra-plan in each account. Any role assumed fails
+  # the job, and its credentials are never read.
+  trust:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      # platform, for its site records: every site's roles are tried.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: sites
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts and the gitleaks rules from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-tofu.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-tofu.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: .ci-tofu-actions
+          persist-credentials: false
+
+      # The plan role in each account, as AWS CLI profiles: the script checks with iam:GetRole that each refused role
+      # exists (STS answers AccessDenied for a missing role too).
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::798070830797:role/coderizehq-infra-plan
+          aws-region: us-east-1
+          aws-profile: preview
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-infra-plan
+          aws-region: us-east-1
+          aws-profile: live
+
+      - name: Setup Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: .ci-tofu-actions
+
+      - name: Negative trust tests
+        env:
+          SITES_DIR: sites
+        run: node .ci-tofu-actions/scripts/trustProbe.mjs
 
   plan:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
@@ -98,6 +199,7 @@ jobs:
     env:
       AWS_PROFILE: account
       ROOT: ${{ matrix.root.root }}
+      HAS_READ_APP: ${{ secrets.PLATFORM_READ_APP_KEY != '' && vars.PLATFORM_READ_APP_CLIENT_ID != '' }}
     steps:
       # Written first, so the comment says so if the job dies before planning.
       - name: Start the result
@@ -134,13 +236,23 @@ jobs:
           echo "${TOFU_SHA256}  tofu.zip" | sha256sum -c -
           unzip -q -o tofu.zip tofu -d "$RUNNER_TEMP/bin"
 
+      # GitHub settings are read as the coderizehq-platform-read App (read-only permissions), never the platform App,
+      # whose key lives only in the apply environment.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: read-app
+        if: env.HAS_READ_APP == 'true'
+        with:
+          client-id: ${{ vars.PLATFORM_READ_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PLATFORM_READ_APP_KEY }}
+          owner: CoderizeHQ
+
       # The plan role denies every state write, the lock file included, hence -lock=false. A root whose provider
       # needs a token it wasn't given is skipped rather than failed, and the comment says why.
       - name: tofu plan
         working-directory: ${{ matrix.root.root }}
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.cloudflare-read-token }}
-          GITHUB_TOKEN: ${{ secrets.github-read-token }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.read-app.outputs.token }}
         run: |
           skip() {
             jq -n --arg root "$ROOT" --arg reason "$1" '{root: $root, status: "skipped", reason: $reason}' > "$RESULT_DIR/result.json"
@@ -148,10 +260,10 @@ jobs:
             exit 0
           }
           if grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            skip "needs the cloudflare-read-token secret"
+            skip "needs the CLOUDFLARE_READ_TOKEN secret"
           fi
           if grep -qE '^provider "github"' ./*.tf && [ -z "$GITHUB_TOKEN" ]; then
-            skip "needs the github-read-token secret"
+            skip "needs the PLATFORM_READ_APP_KEY secret and the PLATFORM_READ_APP_CLIENT_ID variable"
           fi
           set +e
           {

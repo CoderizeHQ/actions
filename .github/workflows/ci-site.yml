@@ -1,37 +1,103 @@
 name: ci-site
 
-# The shared check every site repo's ci.yml calls; the `sites` ruleset requires its result from the GitHub Actions
-# app. First version, for the Phase 1 hard gate: the full checks (build, lint, gitleaks, audit, lockfile sources, axe)
-# come in Phase 3.
+# The checks on every site PR (plan, Phase 3 "Shared workflows", ci-site). site-checks.yml runs it through the `sites`
+# ruleset's "Require workflows to pass", so a PR can't change or skip it by editing its own workflow files, and the
+# ruleset requires this job's result ("ci / ci-site") from the GitHub Actions app.
+#
+# In order: the PR title; gitleaks over the full history; the lockfile, package.json and dependency checks on the
+# committed files, before anything from the site runs; then install, Prettier, ESLint, tests, the build, and the SEO
+# check of what the build wrote. Prettier and ESLint run only where the repo configures them (the site template adds
+# both in Phase 4); tests only where package.json has a test script. The scripts come from this workflow's own commit.
 on:
   workflow_call:
+    inputs:
+      build-dir:
+        description: Where the build writes the site
+        type: string
+        default: dist
 
 permissions:
   contents: read
+
+env:
+  # From gitleaks_8.30.1_checksums.txt on the gitleaks release page, as in ci-tofu.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  SORT_PACKAGE_JSON_VERSION: 4.1.0
 
 jobs:
   # No job-level `if:` here or in callers: a skipped required job counts as passing.
   ci-site:
     # The org variable RUNNER_LABEL switches every repo between the runner VM and GitHub-hosted runners in one change.
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
     steps:
+      # The site and the scripts in separate folders, so the site's tools never see the scripts' files.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0
+          path: site
 
       # Lets the hard gate make a PR fail on purpose.
       - name: Gate-test switch
+        working-directory: site
         run: |
           if [ -e GATE_FAIL ]; then
             echo "::error::GATE_FAIL is present"; exit 1
           fi
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-site.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-site.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      # pnpm's version comes from the site's packageManager.
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: site
+
+      - name: PR title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node actions/scripts/prTitle.mjs
+
+      # The binary, not gitleaks-action, which needs a paid licence for organizations.
+      - name: gitleaks (full history)
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 1 --config "$GITHUB_WORKSPACE/actions/config/gitleaks.toml" "$GITHUB_WORKSPACE/site"
 
       # A lockfile change with no package.json change is how a dependency gets swapped without anyone noticing.
       # Only Renovate's own lockfile updates may do it: its App opened the PR, from a renovate/** branch (which only
       # Renovate can write), and every commit is Renovate's.
       - name: Lockfile changes need a package.json change
         if: github.event_name == 'pull_request'
+        working-directory: site
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
@@ -50,3 +116,70 @@ jobs:
               exit 1
             fi
           fi
+
+      # Real version ranges only, and pnpm-lock.yaml as the only lockfile.
+      - name: Package checks
+        env:
+          REPO_DIR: site
+        run: node actions/scripts/packageCheck.mjs
+
+      - name: package.json order
+        working-directory: site
+        run: git ls-files -z -- package.json '*/package.json' | xargs -0 pnpm dlx "sort-package-json@${SORT_PACKAGE_JSON_VERSION}" --check
+
+      # Every package from the npm registry, with the checksum the registry publishes for it.
+      - name: Lockfile sources
+        env:
+          REPO_DIR: site
+        run: node actions/scripts/lockfileCheck.mjs
+
+      # Moderate and above fail, unless audit-ignore.json lists the advisory with a reason and an unexpired date.
+      - name: Dependency audit
+        env:
+          REPO_DIR: site
+        run: node actions/scripts/auditCheck.mjs
+
+      - name: Install
+        working-directory: site
+        run: pnpm install --frozen-lockfile
+
+      - name: Prettier
+        working-directory: site
+        run: |
+          config=$(find . -maxdepth 1 \( -name .prettierrc -o -name '.prettierrc.*' -o -name 'prettier.config.*' \) -print -quit)
+          if [ -z "$config" ] && ! jq -e 'has("prettier")' package.json >/dev/null; then
+            echo "::notice::No Prettier config in this repo, so formatting isn't checked (the site template adds one in Phase 4)"
+            exit 0
+          fi
+          [ -x node_modules/.bin/prettier ] || { echo "::error::the repo configures Prettier but doesn't install it; add prettier to devDependencies"; exit 1; }
+          pnpm exec prettier --check .
+
+      - name: ESLint
+        working-directory: site
+        run: |
+          config=$(find . -maxdepth 1 -name 'eslint.config.*' -print -quit)
+          if [ -z "$config" ]; then
+            echo "::notice::No eslint.config.js in this repo, so it isn't linted (the shared config comes in Phase 4)"
+            exit 0
+          fi
+          [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
+          pnpm exec eslint .
+
+      - name: Tests
+        working-directory: site
+        run: |
+          if ! jq -e '.scripts.test' package.json >/dev/null; then
+            echo "::notice::package.json has no test script, so there are no tests to run"
+            exit 0
+          fi
+          pnpm test
+
+      - name: Build
+        working-directory: site
+        run: pnpm run build
+
+      # Canonicals, the sitemap, robots.txt, titles and trailing slashes, in what the build wrote.
+      - name: SEO check
+        env:
+          BUILD_DIR: site/${{ inputs.build-dir }}
+        run: node actions/scripts/seoCheck.mjs

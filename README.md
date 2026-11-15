@@ -14,17 +14,61 @@ runners), falling back to `ubuntu-24.04`. Scripts live in `scripts/` and `releas
 commit of itself the run uses (the run's `referenced_workflows`) and loads its scripts from that same commit, so a site
 pinned to `v1.2.3` runs `v1.2.3`'s scripts. Jobs that do that need `actions: read` from the caller.
 
+The checks reach PRs through platform's rulesets ("Require workflows to pass"), not through each repo's own workflow
+files, so a PR can't change or skip them: the `sites` ruleset runs `site-checks.yml` and the `platform` ruleset runs
+`platform-checks.yml`, both from this repo at `refs/tags/v1`. GitHub runs them in the PR's repo, with that repo's
+secrets. Each wrapper calls the shared workflows at `@v1` by full name, so job names (`ci / ci-site`, `axe / axe`) and
+OIDC claims (`job_workflow_ref` `…/ci-tofu.yml@refs/tags/v1`) are the same as when a repo calls them itself. Because
+rulesets pin `v1`, **every file a ruleset names must exist on `v1` before the ruleset that names it is applied**: a
+required workflow that isn't there blocks every PR it covers.
+
 | Workflow | Called by | Inputs | Caller grants | Trust it relies on |
 | --- | --- | --- | --- | --- |
-| `ci-site.yml` | every site PR | none | `contents: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `axe.yml` | every site PR | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | None: no AWS, no secrets. Runs the PR's code |
+| `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
+| `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
+| `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | none | `contents: read`, `actions: read` | None: no AWS, no secrets |
+| `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
-| `ci-tofu.yml` | every platform PR | `roots` (platform's three); secrets `cloudflare-read-token`, `github-read-token` (both optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
+| `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's three); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
 
 Role ARNs are always derived from `site` (`arn:aws:iam::798070830797:role/coderizehq-preview-deploy-<site>`,
 `arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>`); no workflow takes an ARN as an input. `site` must be 1
 to 38 of `a-z`, `0-9` and `-` (the role names must fit IAM's 64 characters).
+
+### ci-site
+
+In this order, so nothing from the site runs before the checks on its committed files:
+
+1. the PR title is a Conventional Commit (`scripts/prTitle.mjs`; pull requests only);
+2. gitleaks over the full history, with `config/gitleaks.toml` (gitleaks' defaults plus the fleet's extra rules; a
+   repo's `.gitleaksignore` clears false positives);
+3. a lockfile change needs a package.json change, unless it's Renovate's App on a `renovate/**` branch with only
+   Renovate's commits (pull requests only);
+4. `scripts/packageCheck.mjs`: no floating version specifiers (`latest`, `next`, `*`, `x`, an empty string, or a
+   non-registry source; `workspace:`, `catalog:`, `link:`, `file:` are fine) in any package.json, and no
+   package-lock.json, npm-shrinkwrap.json or yarn.lock;
+5. every package.json in sort-package-json's order (`pnpm dlx sort-package-json@4.1.0 --check`);
+6. `scripts/lockfileCheck.mjs`: every pnpm-lock.yaml entry from `registry.npmjs.org` (no tarball, git or folder
+   sources) with a sha512 checksum that matches the one the registry publishes for that version, and no `.npmrc`
+   registry but npm's;
+7. `scripts/auditCheck.mjs`: `pnpm audit` at moderate and above. Ignores go in the repo's `audit-ignore.json`, each
+   `{ "id": "GHSA-…", "reason": "…", "expires": "YYYY-MM-DD" }`; an expired one fails, and pnpm's own `auditConfig`
+   is refused (it takes no reason or date);
+8. `pnpm install --frozen-lockfile`, then Prettier (only with a Prettier config in the repo), ESLint (only with an
+   `eslint.config.*`), `pnpm test` (only with a test script) and `pnpm run build`; a missing config or script is
+   a notice, not a failure, until the site template (Phase 4) adds them;
+9. `scripts/seoCheck.mjs` on the build: robots.txt present, not blocking every crawler, naming a sitemap in the
+   build; every sitemap URL https on the host robots.txt names, built, indexable and without a trailing slash; one
+   absolute https canonical per indexable page on that host, no trailing slash, not the home page's elsewhere; a
+   non-empty, unique `<title>` per page; no internal link with a trailing slash.
+
+### ci-node
+
+The PR title, gitleaks, the audit (all as in ci-site), then install, ESLint (with a config) and tests (with a test
+script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of it, and their titles are
+Conventional Commits too (Release Please reads them).
 
 ### deploy-preview
 
@@ -109,8 +153,23 @@ urgent-fix steps and the refusal drills.
 
 ### ci-tofu
 
-`check`: `tofu fmt -check`, `tofu validate` per root, `node --test` (platform's trust-policy and other unit tests),
-gitleaks over the full history. `plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
+`check`: the PR title, `tofu fmt -check`, `tofu validate` per root, `node --test` (platform's trust-policy and other
+unit tests), gitleaks over the full history. `trust`: the live negative trust tests (`scripts/trustProbe.mjs`). The
+job's own OIDC token (platform, a pull request, `ci-tofu.yml@refs/tags/v1`) calls `sts:AssumeRoleWithWebIdentity` on
+every role it must never reach, and each must answer AccessDenied:
+
+| Role | Refused because the token has |
+| --- | --- |
+| `coderizehq-preview-deploy-<site>`, every site | another repository (platform, not the site's), another workflow file (not `deploy-preview.yml`), a pull-request ref (not main) |
+| `coderizehq-live-publish-<site>`, every live site | another repository, another workflow file (not `release.yml`), no `release` environment, a pull-request ref (not a version tag or main) |
+| `coderizehq-infra-deploy`, each account | the right repository, but another workflow file (actions' `ci-tofu.yml`, not platform's `apply.yml`), no `apply` environment, not main |
+
+Every attempt differs from its role's trust in more than one way, so this proves the deployed policies refuse a
+platform PR; platform's `aws/trust/trust.test.mjs` proves each condition on its own against the templates (another
+repository, a fork, another workflow file, a branch instead of a tag, a `v10` tag, the live role without the release
+environment). An assumed role fails the job (its credentials are never read), and so does any other answer than
+AccessDenied, a refused role that doesn't exist (checked with `iam:GetRole` as the plan role), or a control that
+fails: the same token must assume `coderizehq-infra-plan` in each account through the same unsigned call. `plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
 `state`) and the root's own account's for its resources (profile `account`), `tofu plan -lock=false`. A root whose
 provider needs a token the caller didn't pass (Cloudflare, GitHub) is skipped and says so. `comment`: one PR comment
 with every plan, updated on each push.
@@ -128,7 +187,8 @@ on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, 
 | --- | --- |
 | `release-check/` | The `release` check as a composite action (`uses: CoderizeHQ/actions/release-check@v1`), and the code release.yml verifies with |
 | `.github/workflows/review-stub.yml`, `scripts/reviewStub.mjs` | The `review` check until the review service (Phase 5): every 5 minutes, as the `coderizehq-reviewer` App, from the `review` environment (main only) |
-| `.github/workflows/test.yml` | Every `*.test.mjs`, including dry runs of deploy-preview and release against an in-memory S3 (`scripts/lib/memoryStore.mjs`) |
+| `.github/workflows/ci.yml` | This repo's own PR checks: `ci-node` by path. Its tests are every `*.test.mjs`, including dry runs of deploy-preview and release against an in-memory S3 (`scripts/lib/memoryStore.mjs`) |
+| `config/gitleaks.toml` | The secret-scan rules every check runs gitleaks with |
 
 `v1` is moved only by `platform`'s `release-bootstrap` workflow (James starts it), as the release App, after the canary
 (see Versions); the `tags` ruleset refuses everyone else.
@@ -137,7 +197,9 @@ on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, 
 
 - The canary covers `deploy-preview` only; `release.yml`, `ci-site` and `axe` on the canary channel come later
   (platform's `docs/release-safety.md`).
-- ci-tofu's plans of roots that use the Cloudflare or GitHub provider need read-only tokens passed as
-  `cloudflare-read-token` and `github-read-token`; until then those plans are skipped.
+- ci-tofu's plans of roots that use the Cloudflare or GitHub provider need platform's `CLOUDFLARE_READ_TOKEN` and
+  `PLATFORM_READ_APP_KEY` secrets and `PLATFORM_READ_APP_CLIENT_ID` variable (platform's README says what they are);
+  until then those plans are skipped.
+- ci-site's workflow standards check (each repo's files against the template) comes with the template in Phase 4.
 - The runner VM (Phase 3): jobs need `gh`, `jq`, `curl`, `unzip` and, for axe, Playwright's system packages
-  (`playwright install --with-deps`, which needs root) on its image.
+  (`playwright install --with-deps`, which needs root) on its image; ci-tofu's `trust` job also needs the AWS CLI.

@@ -1,0 +1,113 @@
+name: ci-node
+
+# The checks on every PR of a Node repo that isn't a site: the AI services, claude-config, and actions itself (plan,
+# Phase 3 "Shared workflows", ci-node). A repo's ci.yml calls it:
+#   uses: CoderizeHQ/actions/.github/workflows/ci-node.yml@v1
+#   permissions: { contents: read, actions: read }
+# actions' own ci.yml calls it by path, so a change to these checks is tested on its own PR.
+#
+# The PR title, gitleaks over the full history and the dependency audit, then install, ESLint (where the repo has a
+# config) and tests (where package.json has a test script). The scripts come from this workflow's own commit.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # From gitleaks_8.30.1_checksums.txt on the gitleaks release page, as in ci-tofu.
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  ci-node:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          path: repo
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts from that same commit. In actions itself that's the commit under test, already checked out.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
+        run: |
+          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then
+            echo "scripts=repo" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+          echo "scripts=actions" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.self.outputs.scripts == 'actions'
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@24
+          install: false
+          working-directory: repo
+
+      - name: PR title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: node "${{ steps.self.outputs.scripts }}/scripts/prTitle.mjs"
+
+      # The binary, not gitleaks-action, which needs a paid licence for organizations.
+      - name: gitleaks (full history)
+        working-directory: ${{ runner.temp }}
+        env:
+          CONFIG: ${{ github.workspace }}/${{ steps.self.outputs.scripts }}/config/gitleaks.toml
+        run: |
+          curl -fsSL -o gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --redact --no-banner --exit-code 1 --config "$CONFIG" "$GITHUB_WORKSPACE/repo"
+
+      # Moderate and above fail, unless audit-ignore.json lists the advisory with a reason and an unexpired date.
+      - name: Dependency audit
+        env:
+          REPO_DIR: repo
+        run: node "${{ steps.self.outputs.scripts }}/scripts/auditCheck.mjs"
+
+      - name: Install
+        working-directory: repo
+        run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        working-directory: repo
+        run: |
+          config=$(find . -maxdepth 1 -name 'eslint.config.*' -print -quit)
+          if [ -z "$config" ]; then
+            echo "::notice::No eslint.config.js in this repo, so it isn't linted (the shared config comes in Phase 4)"
+            exit 0
+          fi
+          [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
+          pnpm exec eslint .
+
+      - name: Tests
+        working-directory: repo
+        run: |
+          if ! jq -e '.scripts.test' package.json >/dev/null; then
+            echo "::notice::package.json has no test script, so there are no tests to run"
+            exit 0
+          fi
+          pnpm test
