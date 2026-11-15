@@ -135,9 +135,11 @@ jobs:
       actions: read
       id-token: write
     steps:
-      # platform, for its site records: every site's roles are tried.
+      # platform's site records at the PR's base: every site's roles are tried. A record the PR adds has no roles
+      # until its apply, so its refusals would prove nothing; it's tested on the PRs after that.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
           sparse-checkout: sites
 
