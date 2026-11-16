@@ -5,7 +5,28 @@ Shared GitHub Actions workflows for CoderizeHQ repos: the checks every repo runs
 pass. Plan: https://claude.ai/artifact/6E29RvZEoYpcNBBEDRc4gP (fresh start plan v2.0, Phase 3). Site facts, role names,
 the storage layout and the manifest format come from platform's site contract.
 
-Public on purpose: it holds no secrets, and the public `packages` repo can use the same checks.
+## Why this repo is public
+
+Every other CoderizeHQ repo is private. This one stays public on purpose (James's call, C1072, 2026-11-16):
+
+- **The workflows need it.** Every shared workflow checks out `CoderizeHQ/actions` partway through a run, with the
+  caller's own `GITHUB_TOKEN`, to load its scripts at the same version as the workflow: axe, ci-node, ci-site,
+  ci-tofu, deploy-preview and release. A caller's token can read a public repo but not another private one. Making
+  this repo private would break every site's CI, deploys and releases, and platform's plans. The fixes are worse:
+  - a read credential for this repo in every caller, which would put an App key within reach of PR code;
+  - or a redesign. A static `uses:` can't pin the scripts to the workflow's own version.
+- **Nothing in it is secret.** It holds workflow code, scripts and gitleaks rules: no keys, no tokens, no client
+  data. Roles and secrets are named, never stored, and each role's trust is limited to these files at `v1` from
+  CoderizeHQ's own repos, so a copy elsewhere gets nothing.
+- **It's kept safe by:**
+  - the `protected` ruleset: changes only by reviewed PR, the review gate, and James's approval;
+  - the `tags` ruleset: only the release App moves `v1`;
+  - gitleaks on every PR;
+  - Renovate's pins: third-party actions by commit SHA.
+- **The public `packages` repo uses the same checks,** which also needs this repo readable.
+
+Revisit this only if GitHub lets a private repo's workflows check out another private repo in the same org with the
+caller's token.
 
 ## Workflows
 
