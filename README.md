@@ -12,7 +12,8 @@ Public on purpose: it holds no secrets, and the public `packages` repo can use t
 Each runs on `vars.RUNNER_LABEL` (the org variable that moves every repo between the runner VM and GitHub-hosted
 runners), falling back to `ubuntu-26.04`. Scripts live in `scripts/` and `release-check/`; a workflow asks GitHub which
 commit of itself the run uses (the run's `referenced_workflows`) and loads its scripts from that same commit, so a site
-pinned to `v1.2.3` runs `v1.2.3`'s scripts. Jobs that do that need `actions: read` from the caller.
+pinned to `v1.2.3` runs `v1.2.3`'s scripts. Jobs that do that need `actions: read` from the caller. Jobs run Node 26
+(`runtime: node@26`), the LTS line STANDARDS.md 3 names.
 
 The checks reach PRs through platform's rulesets ("Require workflows to pass"), not through each repo's own workflow
 files, so a PR can't change or skip them: the `sites` ruleset runs `site-checks.yml` and the `platform` ruleset runs
