@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.5](https://github.com/CoderizeHQ/actions/compare/v1.0.4...v1.0.5) (2026-11-16)
+
+
+### Bug Fixes
+
+* build and deploy sites on Node 26 and Ubuntu 26.04 ([#21](https://github.com/CoderizeHQ/actions/issues/21)) ([b3c4a36](https://github.com/CoderizeHQ/actions/commit/b3c4a362e6e5d8b09258b4a33dd1e906fc0c4a35))
+
 ## [1.0.4](https://github.com/CoderizeHQ/actions/compare/v1.0.3...v1.0.4) (2026-11-15)
 
 
