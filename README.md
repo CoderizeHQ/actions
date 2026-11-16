@@ -10,7 +10,7 @@ Public on purpose: it holds no secrets, and the public `packages` repo can use t
 ## Workflows
 
 Each runs on `vars.RUNNER_LABEL` (the org variable that moves every repo between the runner VM and GitHub-hosted
-runners), falling back to `ubuntu-24.04`. Scripts live in `scripts/` and `release-check/`; a workflow asks GitHub which
+runners), falling back to `ubuntu-26.04`. Scripts live in `scripts/` and `release-check/`; a workflow asks GitHub which
 commit of itself the run uses (the run's `referenced_workflows`) and loads its scripts from that same commit, so a site
 pinned to `v1.2.3` runs `v1.2.3`'s scripts. Jobs that do that need `actions: read` from the caller.
 
