@@ -187,7 +187,6 @@ on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, 
 | Path | What |
 | --- | --- |
 | `release-check/` | The `release` check as a composite action (`uses: CoderizeHQ/actions/release-check@v1`), and the code release.yml verifies with |
-| `.github/workflows/review-stub.yml`, `scripts/reviewStub.mjs` | The `review` check until the review service (Phase 5): every 5 minutes, as the `coderizehq-reviewer` App, from the `review` environment (main only) |
 | `.github/workflows/ci.yml` | This repo's own PR checks: `ci-node` by path. Its tests are every `*.test.mjs`, including dry runs of deploy-preview and release against an in-memory S3 (`scripts/lib/memoryStore.mjs`) |
 | `config/gitleaks.toml` | The secret-scan rules every check runs gitleaks with |
 
