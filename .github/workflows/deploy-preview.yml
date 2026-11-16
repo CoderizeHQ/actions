@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     outputs:
       lockfile-sha256: ${{ steps.lockfile.outputs.sha256 }}
     steps:
@@ -55,7 +55,7 @@ jobs:
       - name: Setup pnpm and Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
 
       - run: pnpm install --frozen-lockfile
@@ -73,7 +73,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     # One queue per site: a running deploy is never cancelled, and of the waiting ones the newest wins.
     concurrency:
       group: deploy-preview-${{ inputs.site }}
@@ -106,7 +106,7 @@ jobs:
       - name: Setup pnpm and Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: actions
 
@@ -151,7 +151,7 @@ jobs:
   notify:
     needs: [build, deploy]
     if: always() && contains(needs.*.result, 'failure') && github.ref == 'refs/heads/main'
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
       actions: read
@@ -178,7 +178,7 @@ jobs:
       - name: Setup pnpm and Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: actions
 

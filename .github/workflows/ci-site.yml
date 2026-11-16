@@ -29,7 +29,7 @@ jobs:
   # No job-level `if:` here or in callers: a skipped required job counts as passing.
   ci-site:
     # The org variable RUNNER_LABEL switches every repo between the runner VM and GitHub-hosted runners in one change.
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
       actions: read
@@ -73,7 +73,7 @@ jobs:
       - name: Setup pnpm and Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: site
 

@@ -44,7 +44,7 @@ env:
 
 jobs:
   check:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
       actions: read
@@ -85,7 +85,7 @@ jobs:
         with:
           # platform has no package.json to read a pnpm version from.
           version: 12.15.0
-          runtime: node@24
+          runtime: node@26
           install: false
 
       # Every *.test.mjs in platform: the trust-policy tests, the routers, the not-found function, the site records.
@@ -129,7 +129,7 @@ jobs:
   # policies. The control: the same token must assume coderizehq-infra-plan in each account. Any role assumed fails
   # the job, and its credentials are never read.
   trust:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
       actions: read
@@ -180,7 +180,7 @@ jobs:
       - name: Setup Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: .ci-tofu-actions
 
@@ -190,7 +190,7 @@ jobs:
         run: node .ci-tofu-actions/scripts/trustProbe.mjs
 
   plan:
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -298,7 +298,7 @@ jobs:
     needs: plan
     # After the plans, failed or not, so a failed plan's error shows on the PR too.
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-24.04' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
       actions: read
@@ -327,7 +327,7 @@ jobs:
       - name: Setup Node
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
-          runtime: node@24
+          runtime: node@26
           install: false
           working-directory: actions
 
