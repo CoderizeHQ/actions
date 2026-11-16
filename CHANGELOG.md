@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/CoderizeHQ/actions/compare/v1.0.5...v1.1.0) (2026-11-16)
+
+
+### Features
+
+* plan the cloudflare/ai root on platform PRs, offline ([#25](https://github.com/CoderizeHQ/actions/issues/25)) ([57edbc1](https://github.com/CoderizeHQ/actions/commit/57edbc100af34011d36a0284c1a3a0bde3c76e27))
+
 ## [1.0.5](https://github.com/CoderizeHQ/actions/compare/v1.0.4...v1.0.5) (2026-11-16)
 
 
