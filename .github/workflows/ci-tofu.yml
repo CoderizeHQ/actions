@@ -12,23 +12,19 @@ name: ci-tofu
 # -lock=false. `comment` posts every plan on the PR in one comment, updated on each push.
 #
 # A plan runs the PR's code with the plan role's read access, so that role holds nothing that can change anything,
-# and the credentials it gets are read-only: two Cloudflare tokens (DNS; the AI gateway's Zero Trust settings) and the
-# coderizehq-platform-read App.
+# and the two credentials it gets are read-only: a Cloudflare token and the coderizehq-platform-read App.
 on:
   workflow_call:
     inputs:
       roots:
-        description: JSON list of the OpenTofu roots, each with the account its resources live in, and "cloudflare":"zt" for a root that reads Cloudflare Zero Trust settings
+        description: JSON list of the OpenTofu roots, each with the account its resources live in, and "offline":true for a root planned against its last applied state with no provider credentials
         type: string
-        default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043"},{"root":"aws/preview","account":"798070830797"},{"root":"cloudflare/ai","account":"243891826043","cloudflare":"zt"}]'
+        default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043"},{"root":"aws/preview","account":"798070830797"},{"root":"cloudflare/ai","account":"243891826043","offline":true}]'
     # Named like the caller's repository secrets, so a caller can pass them one by one or with `secrets: inherit`.
     # The read App's client id is the caller's PLATFORM_READ_APP_CLIENT_ID variable.
     secrets:
       CLOUDFLARE_READ_TOKEN:
         description: A read-only Cloudflare token (Zone Read, DNS Read) for roots with the cloudflare provider; without it their plans are skipped
-        required: false
-      CLOUDFLARE_ZT_READ_TOKEN:
-        description: A read-only Cloudflare token (Tunnel Read, Access Apps and Policies Read, Access Service Tokens Read) for roots marked "cloudflare":"zt"; without it their plans are skipped
         required: false
       PLATFORM_READ_APP_KEY:
         description: The coderizehq-platform-read App's private key, for the root with the github provider; without it that plan is skipped
@@ -205,6 +201,7 @@ jobs:
     env:
       AWS_PROFILE: account
       ROOT: ${{ matrix.root.root }}
+      OFFLINE: ${{ matrix.root.offline == true }}
       HAS_READ_APP: ${{ secrets.PLATFORM_READ_APP_KEY != '' && vars.PLATFORM_READ_APP_CLIENT_ID != '' }}
     steps:
       # Written first, so the comment says so if the job dies before planning.
@@ -257,10 +254,9 @@ jobs:
       - name: tofu plan
         working-directory: ${{ matrix.root.root }}
         env:
-          # A root marked "cloudflare":"zt" (the AI gateway's tunnel and Access app) reads Zero Trust settings in another
-          # account, with its own read-only token; the rest read DNS with the other one. Never the other's token.
-          CLOUDFLARE_API_TOKEN: ${{ matrix.root.cloudflare == 'zt' && secrets.CLOUDFLARE_ZT_READ_TOKEN || matrix.root.cloudflare != 'zt' && secrets.CLOUDFLARE_READ_TOKEN || '' }}
-          CLOUDFLARE_SECRET: ${{ matrix.root.cloudflare == 'zt' && 'CLOUDFLARE_ZT_READ_TOKEN' || 'CLOUDFLARE_READ_TOKEN' }}
+          # An offline root (the AI gateway's tunnel and Access app, in another Cloudflare account) gets no token at
+          # all: the PR's code runs here, and no credential for those settings should be within its reach.
+          CLOUDFLARE_API_TOKEN: ${{ matrix.root.offline != true && secrets.CLOUDFLARE_READ_TOKEN || '' }}
           GITHUB_TOKEN: ${{ steps.read-app.outputs.token }}
         run: |
           skip() {
@@ -268,14 +264,19 @@ jobs:
             echo "::notice::$ROOT: plan skipped: $1"
             exit 0
           }
-          if grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            skip "needs the $CLOUDFLARE_SECRET secret"
-          fi
           # A read-only App can't read org rulesets (403) or repositories' merge settings (they need contents write),
           # so a root with the github provider plans against its last applied state instead of live GitHub: exactly
           # what the PR changes. Hand-made changes to GitHub settings show in the plan apply.yml runs on every merge.
           refresh=()
           note=""
+          # An offline root has no data sources and is planned against its last applied state without reading live
+          # settings, so it needs no credentials; drift shows in apply.yml's plan on every merge, as for GitHub below.
+          if [ "$OFFLINE" = true ]; then
+            refresh=(-refresh=false)
+            note="against the last applied state, with no provider credentials; live settings aren't read"
+          elif grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            skip "needs the CLOUDFLARE_READ_TOKEN secret"
+          fi
           if grep -qE '^provider "github"' ./*.tf; then
             [ -n "$GITHUB_TOKEN" ] || skip "needs the PLATFORM_READ_APP_KEY secret and the PLATFORM_READ_APP_CLIENT_ID variable"
             refresh=(-refresh=false)

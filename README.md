@@ -32,7 +32,7 @@ required workflow that isn't there blocks every PR it covers.
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
-| `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four); secrets `CLOUDFLARE_READ_TOKEN`, `CLOUDFLARE_ZT_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
+| `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
 
 Role ARNs are always derived from `site` (`arn:aws:iam::798070830797:role/coderizehq-preview-deploy-<site>`,
 `arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>`); no workflow takes an ARN as an input. `site` must be 1
@@ -197,9 +197,9 @@ on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, 
 
 - The canary covers `deploy-preview` only; `release.yml`, `ci-site` and `axe` on the canary channel come later
   (platform's `docs/release-safety.md`).
-- ci-tofu's plans of roots that use the Cloudflare or GitHub provider need platform's `CLOUDFLARE_READ_TOKEN`,
-  `CLOUDFLARE_ZT_READ_TOKEN` (for `cloudflare/ai`) and `PLATFORM_READ_APP_KEY` secrets and `PLATFORM_READ_APP_CLIENT_ID`
-  variable (platform's README says what they are); until then those plans are skipped.
+- ci-tofu's plans of roots that use the Cloudflare or GitHub provider need platform's `CLOUDFLARE_READ_TOKEN` and
+  `PLATFORM_READ_APP_KEY` secrets and `PLATFORM_READ_APP_CLIENT_ID` variable (platform's README says what they are);
+  until then those plans are skipped.
 - ci-site's workflow standards check (each repo's files against the template) comes with the template in Phase 4.
 - The runner VM (Phase 3): jobs need `gh`, `jq`, `curl`, `unzip` and, for axe, Playwright's system packages
   (`playwright install --with-deps`, which needs root) on its image; ci-tofu's `trust` job also needs the AWS CLI.
