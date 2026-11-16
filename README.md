@@ -17,14 +17,15 @@ public on purpose (James's call, C1072, 2026-11-16):
   - a read credential for this repo in every caller, which would put an App key within reach of PR code;
   - or a redesign. A static `uses:` can't pin the scripts to the workflow's own version.
 - **Nothing in it is secret.** It holds workflow code, scripts and gitleaks rules: no keys, no tokens, no client
-  data. Roles and secrets are named, never stored, and each role's trust is limited to these files at `v1` from
-  CoderizeHQ's own repos, so a copy elsewhere gets nothing.
+  data. Roles and secrets are named, never stored. Each AWS role these workflows use trusts only its own workflow
+  file here at `v1` (`job_workflow_ref`), run from a named CoderizeHQ repo (org and repo ids, on `main`; platform's
+  `aws/trust/`), so a copy of this repo elsewhere gets nothing.
 - **It's kept safe by:**
   - the `protected` ruleset: changes only by reviewed PR, the review gate, and James's approval;
   - the `tags` ruleset: only the release App moves `v1`;
   - gitleaks on every PR;
   - Renovate's pins: third-party actions by commit SHA.
-- **The public `packages` repo uses the same checks,** which also needs this repo readable.
+- **The public `packages` repo uses the same checks,** which also requires this repo to be readable.
 
 Revisit this only if GitHub lets a private repo's workflows check out another private repo in the same org with the
 caller's token.
