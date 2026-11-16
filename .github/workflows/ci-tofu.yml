@@ -272,6 +272,11 @@ jobs:
           # An offline root has no data sources and is planned against its last applied state without reading live
           # settings, so it needs no credentials; drift shows in apply.yml's plan on every merge, as for GitHub below.
           if [ "$OFFLINE" = true ]; then
+            # A data source would need live credentials; say so plainly instead of failing on a provider auth error.
+            if grep -qE '^data "' ./*.tf; then
+              echo "::error::$ROOT is planned offline (no credentials), so it can't have data sources"
+              exit 1
+            fi
             refresh=(-refresh=false)
             note="against the last applied state, with no provider credentials; live settings aren't read"
           elif grep -qE '^provider "cloudflare"' ./*.tf && [ -z "$CLOUDFLARE_API_TOKEN" ]; then
@@ -280,7 +285,7 @@ jobs:
           if grep -qE '^provider "github"' ./*.tf; then
             [ -n "$GITHUB_TOKEN" ] || skip "needs the PLATFORM_READ_APP_KEY secret and the PLATFORM_READ_APP_CLIENT_ID variable"
             refresh=(-refresh=false)
-            note="against the last applied state; live GitHub settings aren't read"
+            note="${note:-against the last applied state}; live GitHub settings aren't read"
           fi
           set +e
           {
