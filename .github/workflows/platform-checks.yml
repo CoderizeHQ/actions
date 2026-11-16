@@ -6,7 +6,7 @@ name: platform-checks
 #
 # ci-tofu is called at v1 by its full name, so its jobs' OIDC tokens carry
 # job_workflow_ref CoderizeHQ/actions/.github/workflows/ci-tofu.yml@refs/tags/v1: the only workflow
-# coderizehq-infra-plan trusts. The two read-only credentials are platform's own repository secrets (a ruleset
+# coderizehq-infra-plan trusts. The read-only credentials are platform's own repository secrets (a ruleset
 # workflow reads the target repo's secrets, never this repo's), passed by name rather than `secrets: inherit`, so the
 # PR's code never sees platform's other secrets.
 on:
@@ -28,4 +28,5 @@ jobs:
       pull-requests: write
     secrets:
       CLOUDFLARE_READ_TOKEN: ${{ secrets.CLOUDFLARE_READ_TOKEN }}
+      CLOUDFLARE_ZT_READ_TOKEN: ${{ secrets.CLOUDFLARE_ZT_READ_TOKEN }}
       PLATFORM_READ_APP_KEY: ${{ secrets.PLATFORM_READ_APP_KEY }}
