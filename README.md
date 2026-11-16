@@ -7,7 +7,8 @@ the storage layout and the manifest format come from platform's site contract.
 
 ## Why this repo is public
 
-Every other CoderizeHQ repo is private. This one stays public on purpose (James's call, C1072, 2026-11-16):
+CoderizeHQ repos are private except two: `packages` (public so npm can show provenance) and this one, which stays
+public on purpose (James's call, C1072, 2026-11-16):
 
 - **The workflows need it.** Every shared workflow checks out `CoderizeHQ/actions` partway through a run, with the
   caller's own `GITHUB_TOKEN`, to load its scripts at the same version as the workflow: axe, ci-node, ci-site,
