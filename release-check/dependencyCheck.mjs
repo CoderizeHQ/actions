@@ -7,9 +7,10 @@
 // - moved every package that changed version within its minor or patch line, from the npm registry only;
 // - passed every check on its last commit (ci-site's lockfile checks among them).
 // The one other commit allowed is platform's own file sync: a commit the platform App wrote straight to main through
-// GitHub's API (signed by GitHub as web-flow) that touches only the files platform manages in every site repo, none of
-// them part of the built site. Only bypass actors on the `sites` ruleset can write to main without a PR, and platform
-// writes these files there (platform tofu/sites.tf), so without this no site could ever have a dependency-only release.
+// GitHub's API (signed by GitHub as web-flow) that touches only CODEOWNERS or renovate.json, which change neither the
+// build nor the release. Only bypass actors on the `sites` ruleset can write to main without a PR, and platform writes
+// its files there (platform tofu/sites.tf), so without this one sync would block every later dependency-only release.
+// A sync of a workflow (deploy-preview.yml or release.yml) still leaves the next release for James.
 // Anything else in the gap leaves the release for James.
 //
 // The gap starts at the last version tag's release, not the last dependency run. Version tags can only be cut by
@@ -25,14 +26,14 @@ export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's s
 export const PLATFORM_ID = 356706027 // coderizehq-platform[bot]: platform's App, which writes the files below
 export const WEB_FLOW_ID = 19864447 // web-flow: GitHub's committer, and signer, for commits an App makes through the API
 
-// The files platform writes into every site repo that change neither what is built nor how: CoderizeHQ/platform
-// tofu/sites.tf, local.site_files, less deploy-preview.yml. Keep this in step with it. deploy-preview.yml is left out on
-// purpose: a push runs the workflow file at that commit, so a sync of it changes how that commit's stored build is made,
-// and the first build made that way goes live only with James's release. A file that is part of the build
-// (BUILD_INPUT) is never exempt, even if platform starts managing it.
-export const PLATFORM_FILES = new Set(['.github/workflows/release.yml', '.github/CODEOWNERS', 'renovate.json'])
-const BUILD_INPUT =
-  /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|astro\.config\.|src\/|public\/|\.github\/workflows\/deploy-preview\.yml$)/
+// The files platform writes into every site repo (CoderizeHQ/platform tofu/sites.tf, local.site_files) that change
+// neither what is built, nor how it's built or released. Keep this in step with it. The two workflows platform syncs
+// are left out on purpose: deploy-preview.yml decides how a commit's stored build is made, and release.yml how it is
+// released, so after a sync of either the next release goes live only with James's approval. A file that is part of the
+// build or release (NEVER_EXEMPT) is refused even if it is ever added here.
+export const PLATFORM_FILES = new Set(['.github/CODEOWNERS', 'renovate.json'])
+const NEVER_EXEMPT =
+  /^(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|astro\.config\.[a-z]+|\.github\/workflows\/.*|src\/.*|public\/.*)$/
 
 /**
  * Why a commit that isn't a PR merge is not platform's file sync, or [] when it is one.
@@ -48,7 +49,7 @@ export function platformSyncProblems(c) {
   if (c.parents !== 1) problems.push('it is a merge commit')
   if (!c.filesComplete || c.files.length === 0) problems.push('its files could not all be listed')
   for (const f of c.files) {
-    if (BUILD_INPUT.test(f.name) || !PLATFORM_FILES.has(f.name)) problems.push(`it changes ${f.name}, which platform doesn't sync`)
+    if (NEVER_EXEMPT.test(f.name) || !PLATFORM_FILES.has(f.name)) problems.push(`it changes ${f.name}, which only James may release`)
     // Platform writes files in place; a rename could carry a build input in under a synced file's name.
     if (f.status === 'renamed' || f.previous) problems.push(`it renames ${f.previous ?? 'a file'} to ${f.name}`)
   }
@@ -59,7 +60,8 @@ const PNPM = /^pnpm@(\d+\.\d+\.\d+)(?:\+sha(?:256|512)\.[0-9a-f]+)?$/
 
 /**
  * Why a Renovate PR's package.json change is more than a pnpm minor or patch update in `packageManager`, or [].
- * @param {string | null | undefined} before package.json at the PR's base @param {string | null | undefined} after at its head
+ * @param {string | null | undefined} before package.json at the squash merge's parent
+ * @param {string | null | undefined} after package.json at the squash merge commit
  * @returns {string[]}
  */
 export function packageManagerProblems(before, after) {

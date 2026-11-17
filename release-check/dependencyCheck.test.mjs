@@ -126,7 +126,7 @@ test("platform's file sync in the gap doesn't stop a dependency release", () => 
     facts({
       commits: [
         { sha: 's1', pr: null, commit: sync() },
-        { sha: 's2', pr: null, commit: sync({ files: [{ name: '.github/workflows/release.yml', status: 'modified' }] }) },
+        { sha: 's2', pr: null, commit: sync({ files: [{ name: '.github/CODEOWNERS', status: 'modified' }] }) },
         { sha: 'c1', pr: pr() },
       ],
     }),
@@ -156,11 +156,11 @@ test('a direct commit is refused unless it is exactly a platform sync of the fil
 test('the files platform syncs are never build inputs', () => {
   assert.deepEqual(platformSyncProblems(sync({ files: [{ name: '.github/CODEOWNERS', status: 'modified' }] })), [])
   assert.deepEqual(platformSyncProblems(sync({ files: [{ name: 'renovate.json', status: 'added' }] })), [])
-  // deploy-preview.yml decides how the commit is built, so a sync of it waits for James.
-  assert.match(
-    platformSyncProblems(sync({ files: [{ name: '.github/workflows/deploy-preview.yml', status: 'modified' }] })).join(' '),
-    /changes \.github\/workflows\/deploy-preview\.yml/,
-  )
+  // The workflows decide how a commit is built and released, so a sync of either waits for James.
+  for (const name of ['.github/workflows/deploy-preview.yml', '.github/workflows/release.yml']) {
+    assert.match(platformSyncProblems(sync({ files: [{ name, status: 'modified' }] })).join(' '), /only James may release/)
+  }
+  assert.match(platformSyncProblems(sync({ files: [{ name: 'package.json5', status: 'modified' }] })).join(' '), /only James/)
 })
 
 test('a gap of platform syncs alone publishes nothing', () => {

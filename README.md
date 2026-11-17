@@ -123,8 +123,9 @@ Conventional Commits too (Release Please reads them).
      `packageManager` line, to a minor or patch pnpm, nothing else in package.json), every version move minor or patch
      from the npm registry, all checks passed. The one other commit allowed is platform's file sync: written by the
      platform App through GitHub's API (committer web-flow, signed), one parent, no renames, and touching only platform's
-     synced files that change neither what is built nor how (`release.yml`, `CODEOWNERS`, `renovate.json`; platform's
-     `tofu/sites.tf`). A sync of `deploy-preview.yml` waits for James, because it changes how that commit is built.
+     synced files that change neither the build nor the release (`CODEOWNERS`, `renovate.json`; platform's
+     `tofu/sites.tf`). A sync of a workflow (`deploy-preview.yml` or `release.yml`) waits for James, because it changes
+     how that commit is built or released.
      The run still publishes the build deploy-preview stored for the run's own commit, never a rebuild. A gap with no
      dependency update (nothing new, or platform syncs alone) publishes nothing; anything else is left for James;
    - anything else is refused.
