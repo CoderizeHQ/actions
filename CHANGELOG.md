@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/CoderizeHQ/actions/compare/v1.1.1...v1.2.0) (2026-11-17)
+
+
+### Features
+
+* skip the live publish role for a preview-only site record ([#30](https://github.com/CoderizeHQ/actions/issues/30)) ([49a9307](https://github.com/CoderizeHQ/actions/commit/49a9307db90aa622c8f023c8bfda11a8a708528c))
+
 ## [1.1.1](https://github.com/CoderizeHQ/actions/compare/v1.1.0...v1.1.1) (2026-11-17)
 
 
