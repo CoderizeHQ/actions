@@ -39,7 +39,7 @@ const BUILD_INPUT = /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmr
 /**
  * Why a commit that isn't a PR merge is not platform's file sync, or [] when it is one.
  * @param {{ authorId: number | null, committerId: number | null, verified: boolean, parents: number,
- *   files: { name: string, status: string }[], filesComplete: boolean } | null | undefined} c
+ *   files: { name: string, status: string, previous?: string | null }[], filesComplete: boolean } | null | undefined} c
  * @returns {string[]}
  */
 export function platformSyncProblems(c) {
@@ -51,6 +51,8 @@ export function platformSyncProblems(c) {
   if (!c.filesComplete || c.files.length === 0) problems.push('its files could not all be listed')
   for (const f of c.files) {
     if (BUILD_INPUT.test(f.name) || !PLATFORM_FILES.has(f.name)) problems.push(`it changes ${f.name}, which platform doesn't sync`)
+    // Platform writes files in place; a rename could carry a build input in under a synced file's name.
+    if (f.status === 'renamed' || f.previous) problems.push(`it renames ${f.previous ?? 'a file'} to ${f.name}`)
   }
   return problems
 }
@@ -222,7 +224,7 @@ async function readCommit(token, repo, sha) {
     committerId: c.committer?.id ?? null,
     verified: Boolean(c.commit?.verification?.verified),
     parents: c.parents?.length ?? 0,
-    files: files.map((f) => ({ name: f.filename, status: f.status })),
+    files: files.map((f) => ({ name: f.filename, status: f.status, previous: f.previous_filename ?? null })),
     // GitHub lists at most 300 files on one commit and paginates the rest; a sync touches a handful.
     filesComplete: files.length < 300,
   }
@@ -244,9 +246,17 @@ async function readPr(token, repo, sha) {
     ghAll(token, `/repos/${repo}/commits/${p.head.sha}/check-runs`, (page) => page?.check_runs ?? []),
     gh(token, `/repos/${repo}/commits/${p.head.sha}/status`),
   ])
-  const packageJson = files.some((f) => f.filename === 'package.json')
-    ? { before: await readText(token, repo, 'package.json', p.base.sha), after: await readText(token, repo, 'package.json', p.head.sha) }
-    : undefined
+  // package.json before and after the merge itself: the squash commit's parent and the squash commit. A PR's base.sha
+  // can move after it merges, so it is not the state the merge changed.
+  let packageJson
+  if (files.some((f) => f.filename === 'package.json')) {
+    const merge = await gh(token, `/repos/${repo}/commits/${sha}`)
+    const parent = merge?.parents?.length === 1 ? merge.parents[0].sha : null
+    packageJson = {
+      before: parent ? await readText(token, repo, 'package.json', parent) : null,
+      after: await readText(token, repo, 'package.json', sha),
+    }
+  }
   return {
     number: p.number,
     merged: Boolean(p.merged_at),

@@ -150,6 +150,7 @@ test('a direct commit is refused unless it is exactly a platform sync of the fil
   refuse(sync({ files: [], filesComplete: true }), /could not all be listed/)
   refuse(sync({ filesComplete: false }), /could not all be listed/)
   refuse(undefined, /could not be read/)
+  refuse(sync({ files: [{ name: 'renovate.json', status: 'renamed', previous: 'src/config/site.js' }] }), /renames src\/config\/site\.js/)
 })
 
 test('the files platform syncs are never build inputs', () => {
