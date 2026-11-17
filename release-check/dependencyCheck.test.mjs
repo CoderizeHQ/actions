@@ -195,6 +195,8 @@ test('package.json may change only its packageManager line, and only to a minor 
   assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@12.20.0', { scripts: { build: 'x' } })).join(' '), /more than packageManager/)
   assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@13.0.0')).join(' '), /not a minor or patch/)
   assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@12.15.0')).join(' '), /not a minor or patch/)
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.20.0'), pkgJson('pnpm@12.15.0')).join(' '), /not a minor or patch/)
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.20.1'), pkgJson('pnpm@12.20.0')).join(' '), /not a minor or patch/)
   assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('yarn@4.1.0')).join(' '), /not a pnpm release/)
   assert.match(packageManagerProblems('{', pkgJson('pnpm@12.20.0')).join(' '), /could not be read/)
 })

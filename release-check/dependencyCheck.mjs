@@ -58,6 +58,14 @@ export function platformSyncProblems(c) {
 
 const PNPM = /^pnpm@(\d+\.\d+\.\d+)(?:\+sha(?:256|512)\.[0-9a-f]+)?$/
 
+/** Whether plain version `to` is later than `from`. */
+function isNewer(from, to) {
+  const a = from.split('.').map(Number)
+  const b = to.split('.').map(Number)
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return b[i] > a[i]
+  return false
+}
+
 /**
  * Why a Renovate PR's package.json change is more than a pnpm minor or patch update in `packageManager`, or [].
  * @param {string | null | undefined} before package.json at the squash merge's parent
@@ -81,7 +89,7 @@ export function packageManagerProblems(before, after) {
   const f = PNPM.exec(from ?? '')
   const t = PNPM.exec(to ?? '')
   if (!f || !t) problems.push(`packageManager ${from} → ${to} is not a pnpm release`)
-  else if (f[1] === t[1] || !isMinorOrPatch(f[1], t[1])) problems.push(`packageManager ${from} → ${to} is not a minor or patch update`)
+  else if (!isMinorOrPatch(f[1], t[1]) || !isNewer(f[1], t[1])) problems.push(`packageManager ${from} → ${to} is not a minor or patch update`)
   return problems
 }
 
