@@ -29,7 +29,7 @@ const arn = (account, role) => `arn:aws:iam::${account}:role/${role}`
 
 /**
  * The roles to try, each with the claims its trust policy accepts (the site contract's table).
- * @param {{ site: string, repo: string, repo_id: number, account: string }[]} sites
+ * @param {{ site: string, repo: string, repo_id: number, account: string, live?: boolean }[]} sites
  */
 export function targets(sites) {
   const list = []
@@ -39,7 +39,9 @@ export function targets(sites) {
       account: PREVIEW_ACCOUNT,
       trusted: { repo: s.repo, repositoryId: String(s.repo_id), workflows: version('deploy-preview.yml'), refs: ['refs/heads/main'], environment: null },
     })
-    if (s.account === 'live') {
+    // A preview-only record ("live": false, platform README "Sites") has no live publish role until its go-live, so
+    // there's nothing to refuse: probing it would fail as a missing role.
+    if (s.account === 'live' && s.live !== false) {
       list.push({
         role: `coderizehq-live-publish-${s.site}`,
         account: LIVE_ACCOUNT,
