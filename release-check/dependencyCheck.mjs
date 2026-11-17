@@ -2,19 +2,86 @@
 // head when the run started) and checks every commit since the last version release up to it. Each must be the
 // squash merge of a PR that:
 // - Renovate's App opened (checked by user ID) from a renovate/** branch, with only Renovate's verified commits;
-// - changed only pnpm-lock.yaml (Renovate's update-lockfile strategy);
+// - changed only pnpm-lock.yaml (Renovate's update-lockfile strategy), and for a pnpm update also package.json's
+//   `packageManager` line, to a minor or patch pnpm, with every other key unchanged;
 // - moved every package that changed version within its minor or patch line, from the npm registry only;
 // - passed every check on its last commit (ci-site's lockfile checks among them).
+// The one other commit allowed is platform's own file sync: a commit the platform App wrote straight to main through
+// GitHub's API (signed by GitHub as web-flow) that touches only the files platform manages in every site repo, none of
+// them part of the built site. Only bypass actors on the `sites` ruleset can write to main without a PR, and platform
+// writes these files there (platform tofu/sites.tf), so without this no site could ever have a dependency-only release.
 // Anything else in the gap leaves the release for James.
 //
 // The gap starts at the last version tag's release, not the last dependency run. Version tags can only be cut by
 // the release App, while anyone with workflow access can create a deployment record, so the last tag is the safe
 // starting point; re-checking PRs an earlier dependency run already took costs nothing.
 
+import { isDeepStrictEqual } from 'node:util'
+
 import { gh, ghAll } from '../scripts/lib/github.mjs'
 import { RELEASE_BOT_ID } from './releaseCheck.mjs'
 
 export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's self-hosted Renovate App (5775623)
+export const PLATFORM_ID = 356706027 // coderizehq-platform[bot]: platform's App, which writes the files below
+export const WEB_FLOW_ID = 19864447 // web-flow: GitHub's committer, and signer, for commits an App makes through the API
+
+// The files platform writes into every site repo: CoderizeHQ/platform tofu/sites.tf, local.site_files. Keep this in
+// step with it. None of them is part of the built site, and a file that is (BUILD_INPUT) is never exempt, even if
+// platform starts managing it.
+export const PLATFORM_FILES = new Set([
+  '.github/workflows/deploy-preview.yml',
+  '.github/workflows/release.yml',
+  '.github/CODEOWNERS',
+  'renovate.json',
+])
+const BUILD_INPUT = /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|astro\.config\.|src\/|public\/)/
+
+/**
+ * Why a commit that isn't a PR merge is not platform's file sync, or [] when it is one.
+ * @param {{ authorId: number | null, committerId: number | null, verified: boolean, parents: number,
+ *   files: { name: string, status: string }[], filesComplete: boolean } | null | undefined} c
+ * @returns {string[]}
+ */
+export function platformSyncProblems(c) {
+  if (!c) return ['its details could not be read']
+  const problems = []
+  if (c.authorId !== PLATFORM_ID) problems.push('it was not written by the platform App')
+  if (c.committerId !== WEB_FLOW_ID || !c.verified) problems.push('it is not a commit GitHub made and signed for an App')
+  if (c.parents !== 1) problems.push('it is a merge commit')
+  if (!c.filesComplete || c.files.length === 0) problems.push('its files could not all be listed')
+  for (const f of c.files) {
+    if (BUILD_INPUT.test(f.name) || !PLATFORM_FILES.has(f.name)) problems.push(`it changes ${f.name}, which platform doesn't sync`)
+  }
+  return problems
+}
+
+const PNPM = /^pnpm@(\d+\.\d+\.\d+)(?:\+sha(?:256|512)\.[0-9a-f]+)?$/
+
+/**
+ * Why a Renovate PR's package.json change is more than a pnpm minor or patch update in `packageManager`, or [].
+ * @param {string | null | undefined} before package.json at the PR's base @param {string | null | undefined} after at its head
+ * @returns {string[]}
+ */
+export function packageManagerProblems(before, after) {
+  let a
+  let b
+  try {
+    a = JSON.parse(before)
+    b = JSON.parse(after)
+  } catch {
+    return ['package.json could not be read before and after']
+  }
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return ['package.json could not be read before and after']
+  const { packageManager: from, ...restA } = a
+  const { packageManager: to, ...restB } = b
+  const problems = []
+  if (!isDeepStrictEqual(restA, restB)) problems.push('package.json changed more than packageManager')
+  const f = PNPM.exec(from ?? '')
+  const t = PNPM.exec(to ?? '')
+  if (!f || !t) problems.push(`packageManager ${from} → ${to} is not a pnpm release`)
+  else if (f[1] === t[1] || !isMinorOrPatch(f[1], t[1])) problems.push(`packageManager ${from} → ${to} is not a minor or patch update`)
+  return problems
+}
 
 const OK_CONCLUSIONS = new Set(['success', 'skipped', 'neutral'])
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/
@@ -71,9 +138,10 @@ export function lockfileChanges(patch) {
 /**
  * @typedef {{ number: number, merged: boolean, mergeSha: string, baseRef: string, authorId: number, headRef: string,
  *   files: { name: string, status: string, patch?: string }[], commits: { authorId: number | null, verified: boolean }[],
- *   checks: { name: string, status: string, conclusion: string | null }[], statusState: string, statusCount: number }} Pr
+ *   checks: { name: string, status: string, conclusion: string | null }[], statusState: string, statusCount: number,
+ *   packageJson?: { before: string | null, after: string | null } }} Pr
  * @param {{ base: { sha: string, tag: string } | null, head: string, compareStatus: string | null,
- *   commits: { sha: string, pr: Pr | null }[] }} facts
+ *   commits: { sha: string, pr: Pr | null, commit?: Parameters<typeof platformSyncProblems>[0] }[] }} facts
  * @returns {{ ok: boolean, nothing: boolean, reasons: string[], prs: number[] }}
  */
 export function decideDependencyRun(facts) {
@@ -86,10 +154,11 @@ export function decideDependencyRun(facts) {
     return { ok: false, nothing: false, reasons: [`main is not ahead of ${facts.base.tag} (GitHub says ${facts.compareStatus})`], prs: [] }
   }
 
-  for (const { sha, pr } of facts.commits) {
+  for (const { sha, pr, commit } of facts.commits) {
     const short = sha.slice(0, 7)
     if (!pr || !pr.merged || pr.mergeSha !== sha) {
-      reasons.push(`${short} is not the merge of a pull request`)
+      const sync = platformSyncProblems(commit)
+      if (sync.length > 0) reasons.push(`${short} is not the merge of a pull request, nor platform's file sync: ${sync.join('; ')}`)
       continue
     }
     const n = `#${pr.number}`
@@ -99,9 +168,15 @@ export function decideDependencyRun(facts) {
     if (pr.commits.length === 0 || !pr.commits.every((c) => c.authorId === RENOVATE_ID && c.verified)) {
       reasons.push(`${n} has commits that are not Renovate's verified commits`)
     }
-    const lockOnly = pr.files.length === 1 && pr.files[0].name === 'pnpm-lock.yaml' && pr.files[0].status === 'modified'
-    if (!lockOnly) reasons.push(`${n} changed more than pnpm-lock.yaml`)
-    else for (const p of lockfileChanges(pr.files[0].patch).problems) reasons.push(`${n}: ${p}`)
+    // pnpm-lock.yaml, plus package.json only for a pnpm update's `packageManager` line.
+    const lock = pr.files.find((f) => f.name === 'pnpm-lock.yaml' && f.status === 'modified')
+    const pkg = pr.files.find((f) => f.name === 'package.json' && f.status === 'modified')
+    const others = pr.files.filter((f) => f !== lock && f !== pkg)
+    if (!lock || others.length > 0) reasons.push(`${n} changed more than pnpm-lock.yaml`)
+    else {
+      for (const p of lockfileChanges(lock.patch).problems) reasons.push(`${n}: ${p}`)
+      if (pkg) for (const p of packageManagerProblems(pr.packageJson?.before, pr.packageJson?.after)) reasons.push(`${n}: ${p}`)
+    }
     const failing = pr.checks.filter((c) => c.status !== 'completed' || !OK_CONCLUSIONS.has(c.conclusion))
     if (pr.checks.length === 0) reasons.push(`${n} has no checks`)
     for (const c of failing) reasons.push(`${n}: check ${c.name} is ${c.conclusion ?? c.status}`)
@@ -128,10 +203,35 @@ export async function checkDependencyRun(token, repo, head) {
     facts.compareStatus = cmp?.status ?? 'missing'
     if (facts.compareStatus === 'ahead') {
       const commits = await ghAll(token, `/repos/${repo}/compare/${base.sha}...${head}`, (p) => p?.commits ?? [])
-      for (const c of commits) facts.commits.push({ sha: c.sha, pr: await readPr(token, repo, c.sha) })
+      for (const c of commits) {
+        const pr = await readPr(token, repo, c.sha)
+        facts.commits.push({ sha: c.sha, pr, commit: pr ? undefined : await readCommit(token, repo, c.sha) })
+      }
     }
   }
   return { ...decideDependencyRun(facts), base }
+}
+
+/** A commit's author, committer, signature, parents and files, for platformSyncProblems. */
+async function readCommit(token, repo, sha) {
+  const c = await gh(token, `/repos/${repo}/commits/${sha}`)
+  if (!c) return null
+  const files = c.files ?? []
+  return {
+    authorId: c.author?.id ?? null,
+    committerId: c.committer?.id ?? null,
+    verified: Boolean(c.commit?.verification?.verified),
+    parents: c.parents?.length ?? 0,
+    files: files.map((f) => ({ name: f.filename, status: f.status })),
+    // GitHub lists at most 300 files on one commit and paginates the rest; a sync touches a handful.
+    filesComplete: files.length < 300,
+  }
+}
+
+/** A file's text at a commit, or null. */
+async function readText(token, repo, path, ref) {
+  const f = await gh(token, `/repos/${repo}/contents/${path}?ref=${ref}`)
+  return typeof f?.content === 'string' ? Buffer.from(f.content, 'base64').toString('utf8') : null
 }
 
 async function readPr(token, repo, sha) {
@@ -144,9 +244,13 @@ async function readPr(token, repo, sha) {
     ghAll(token, `/repos/${repo}/commits/${p.head.sha}/check-runs`, (page) => page?.check_runs ?? []),
     gh(token, `/repos/${repo}/commits/${p.head.sha}/status`),
   ])
+  const packageJson = files.some((f) => f.filename === 'package.json')
+    ? { before: await readText(token, repo, 'package.json', p.base.sha), after: await readText(token, repo, 'package.json', p.head.sha) }
+    : undefined
   return {
     number: p.number,
     merged: Boolean(p.merged_at),
+    packageJson,
     mergeSha: p.merge_commit_sha,
     baseRef: p.base.ref,
     authorId: p.user?.id,

@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { decideDependencyRun, isMinorOrPatch, lockfileChanges, RENOVATE_ID } from './dependencyCheck.mjs'
+import {
+  decideDependencyRun,
+  isMinorOrPatch,
+  lockfileChanges,
+  packageManagerProblems,
+  PLATFORM_ID,
+  platformSyncProblems,
+  RENOVATE_ID,
+  WEB_FLOW_ID,
+} from './dependencyCheck.mjs'
 
 const lockPatch = [
   '@@ -100,7 +100,7 @@ packages:',
@@ -89,7 +98,8 @@ test('a direct push, another branch, extra files, unverified commits or a failed
   }
   refuse(null, /not the merge of a pull request/)
   refuse({ headRef: 'feature/sneaky' }, /renovate\/ branch/)
-  refuse({ files: [...pr().files, { name: 'package.json', status: 'modified', patch: '' }] }, /more than pnpm-lock/)
+  refuse({ files: [...pr().files, { name: 'package.json', status: 'modified', patch: '' }] }, /package.json could not be read/)
+  refuse({ files: [...pr().files, { name: 'README.md', status: 'modified', patch: '' }] }, /more than pnpm-lock/)
   refuse({ commits: [{ authorId: RENOVATE_ID, verified: false }] }, /verified/)
   refuse({ commits: [{ authorId: RENOVATE_ID, verified: true }, { authorId: 1, verified: true }] }, /verified/)
   refuse({ checks: [{ name: 'ci / ci-site', status: 'completed', conclusion: 'failure' }] }, /ci-site is failure/)
@@ -98,4 +108,82 @@ test('a direct push, another branch, extra files, unverified commits or a failed
   refuse({ statusCount: 1, statusState: 'failure' }, /commit status/)
   refuse({ baseRef: 'develop' }, /not merged into main/)
   refuse({ files: [{ name: 'pnpm-lock.yaml', status: 'modified', patch: '-  astro@7.2.9:\n+  astro@8.0.0:' }] }, /not a minor or patch/)
+})
+
+// Platform's file sync: as the platform App writes it straight to main (loadtimecheck-com-web 1241ded, 2026-11-16).
+const sync = (over = {}) => ({
+  authorId: PLATFORM_ID,
+  committerId: WEB_FLOW_ID,
+  verified: true,
+  parents: 1,
+  files: [{ name: 'renovate.json', status: 'modified' }],
+  filesComplete: true,
+  ...over,
+})
+
+test("platform's file sync in the gap doesn't stop a dependency release", () => {
+  const r = decideDependencyRun(
+    facts({
+      commits: [
+        { sha: 's1', pr: null, commit: sync() },
+        { sha: 's2', pr: null, commit: sync({ files: [{ name: '.github/workflows/release.yml', status: 'modified' }] }) },
+        { sha: 'c1', pr: pr() },
+      ],
+    }),
+  )
+  assert.deepEqual(r.reasons, [])
+  assert.equal(r.ok, true)
+})
+
+test('a direct commit is refused unless it is exactly a platform sync of the files platform manages', () => {
+  const refuse = (commit, re) => {
+    const r = decideDependencyRun(facts({ commits: [{ sha: 's1', pr: null, commit }] }))
+    assert.equal(r.ok, false)
+    assert.match(r.reasons.join(' '), re)
+  }
+  refuse(sync({ files: [{ name: 'src/pages/index.astro', status: 'modified' }] }), /changes src\/pages\/index.astro/)
+  refuse(sync({ files: [{ name: 'renovate.json', status: 'modified' }, { name: 'package.json', status: 'modified' }] }), /changes package.json/)
+  refuse(sync({ authorId: 74272118 }), /not written by the platform App/)
+  refuse(sync({ committerId: PLATFORM_ID }), /GitHub made and signed/)
+  refuse(sync({ verified: false }), /GitHub made and signed/)
+  refuse(sync({ parents: 2 }), /merge commit/)
+  refuse(sync({ files: [], filesComplete: true }), /could not all be listed/)
+  refuse(sync({ filesComplete: false }), /could not all be listed/)
+  refuse(undefined, /could not be read/)
+})
+
+test('the files platform syncs are never build inputs', () => {
+  assert.deepEqual(platformSyncProblems(sync({ files: [{ name: '.github/CODEOWNERS', status: 'modified' }] })), [])
+  assert.deepEqual(platformSyncProblems(sync({ files: [{ name: '.github/workflows/deploy-preview.yml', status: 'added' }] })), [])
+})
+
+const pkgJson = (packageManager, extra = {}) =>
+  JSON.stringify({ name: 'loadtimecheck-com-web', private: true, packageManager, engines: { node: '>=24' }, ...extra }, null, 2)
+
+test("a Renovate pnpm update that moves package.json's packageManager line is released", () => {
+  const r = decideDependencyRun(
+    facts({
+      commits: [
+        {
+          sha: 'c1',
+          pr: pr({
+            headRef: 'renovate/pnpm-12.x',
+            files: [...pr().files, { name: 'package.json', status: 'modified', patch: '' }],
+            packageJson: { before: pkgJson('pnpm@12.15.0'), after: pkgJson('pnpm@12.20.0') },
+          }),
+        },
+      ],
+    }),
+  )
+  assert.deepEqual(r.reasons, [])
+  assert.equal(r.ok, true)
+})
+
+test('package.json may change only its packageManager line, and only to a minor or patch pnpm', () => {
+  assert.deepEqual(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@12.20.0+sha512.abc123')), [])
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@12.20.0', { scripts: { build: 'x' } })).join(' '), /more than packageManager/)
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@13.0.0')).join(' '), /not a minor or patch/)
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('pnpm@12.15.0')).join(' '), /not a minor or patch/)
+  assert.match(packageManagerProblems(pkgJson('pnpm@12.15.0'), pkgJson('yarn@4.1.0')).join(' '), /not a pnpm release/)
+  assert.match(packageManagerProblems('{', pkgJson('pnpm@12.20.0')).join(' '), /could not be read/)
 })
