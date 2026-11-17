@@ -192,7 +192,7 @@ every role it must never reach, and each must answer AccessDenied:
 | Role | Refused because the token has |
 | --- | --- |
 | `coderizehq-preview-deploy-<site>`, every site | another repository (platform, not the site's), another workflow file (not `deploy-preview.yml`), a pull-request ref (not main) |
-| `coderizehq-live-publish-<site>`, every live site | another repository, another workflow file (not `release.yml`), no `release` environment, a pull-request ref (not a version tag or main) |
+| `coderizehq-live-publish-<site>`, every live site (not a preview-only record, `"live": false`, which has none) | another repository, another workflow file (not `release.yml`), no `release` environment, a pull-request ref (not a version tag or main) |
 | `coderizehq-infra-deploy`, each account | the right repository, but another workflow file (actions' `ci-tofu.yml`, not platform's `apply.yml`), no `apply` environment, not main |
 
 Every attempt differs from its role's trust in more than one way, so this proves the deployed policies refuse a

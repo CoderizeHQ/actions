@@ -28,6 +28,12 @@ test('every site gets a preview role, live sites a publish role, each account it
   ])
 })
 
+test('a preview-only live-account record ("live": false) gets its preview role, not a publish role', () => {
+  const arns = targets([{ site: 'moving-in-com', repo: 'moving-in-com-web', repo_id: 1460000010, account: 'live', live: false }]).map((t) => t.arn)
+  assert.ok(arns.includes('arn:aws:iam::798070830797:role/coderizehq-preview-deploy-moving-in-com'))
+  assert.ok(!arns.some((a) => a.includes('live-publish')))
+})
+
 test("a platform PR's token differs from each role's trust in the ways the README lists", () => {
   const [preview, live, , deploy] = targets(SITES)
   assert.deepEqual(differences(PR_CLAIMS, preview.trusted), [
