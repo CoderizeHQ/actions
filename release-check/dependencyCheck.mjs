@@ -229,15 +229,16 @@ export async function checkDependencyRun(token, repo, head) {
 async function readCommit(token, repo, sha) {
   const c = await gh(token, `/repos/${repo}/commits/${sha}`)
   if (!c) return null
-  const files = c.files ?? []
+  // Every page of the commit's files, not just the first: a page can stop short of the whole list.
+  const files = await ghAll(token, `/repos/${repo}/commits/${sha}`, (page) => page?.files ?? [])
   return {
     authorId: c.author?.id ?? null,
     committerId: c.committer?.id ?? null,
     verified: Boolean(c.commit?.verification?.verified),
     parents: c.parents?.length ?? 0,
     files: files.map((f) => ({ name: f.filename, status: f.status, previous: f.previous_filename ?? null })),
-    // GitHub lists at most 300 files on one commit and paginates the rest; a sync touches a handful.
-    filesComplete: files.length < 300,
+    // ghAll reads until a short page, and throws past 5000 files, so the list is whole when it returns.
+    filesComplete: true,
   }
 }
 
