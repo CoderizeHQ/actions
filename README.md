@@ -122,10 +122,11 @@ Conventional Commits too (Release Please reads them).
      Renovate's verified commits, changing only `pnpm-lock.yaml` (and for a pnpm update package.json's
      `packageManager` line, to a minor or patch pnpm, nothing else in package.json), every version move minor or patch
      from the npm registry, all checks passed. The one other commit allowed is platform's file sync: written by the
-     platform App through GitHub's API (committer web-flow, signed), one parent, and touching only the files platform
-     manages in every site repo (`deploy-preview.yml`, `release.yml`, `CODEOWNERS`, `renovate.json`; platform's
-     `tofu/sites.tf`), none of them part of the build. The run still publishes the build deploy-preview stored for the
-     run's own commit, never a rebuild. Nothing new publishes nothing; anything else is left for James;
+     platform App through GitHub's API (committer web-flow, signed), one parent, no renames, and touching only platform's
+     synced files that change neither what is built nor how (`release.yml`, `CODEOWNERS`, `renovate.json`; platform's
+     `tofu/sites.tf`). A sync of `deploy-preview.yml` waits for James, because it changes how that commit is built.
+     The run still publishes the build deploy-preview stored for the run's own commit, never a rebuild. A gap with no
+     dependency update (nothing new, or platform syncs alone) publishes nothing; anything else is left for James;
    - anything else is refused.
 2. `publish` (the `release` environment, the live role; one queue per site):
    - finds the live distribution: the one whose Comment is exactly `<site>` (platform sets it), and the domain from

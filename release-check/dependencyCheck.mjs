@@ -25,16 +25,14 @@ export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's s
 export const PLATFORM_ID = 356706027 // coderizehq-platform[bot]: platform's App, which writes the files below
 export const WEB_FLOW_ID = 19864447 // web-flow: GitHub's committer, and signer, for commits an App makes through the API
 
-// The files platform writes into every site repo: CoderizeHQ/platform tofu/sites.tf, local.site_files. Keep this in
-// step with it. None of them is part of the built site, and a file that is (BUILD_INPUT) is never exempt, even if
-// platform starts managing it.
-export const PLATFORM_FILES = new Set([
-  '.github/workflows/deploy-preview.yml',
-  '.github/workflows/release.yml',
-  '.github/CODEOWNERS',
-  'renovate.json',
-])
-const BUILD_INPUT = /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|astro\.config\.|src\/|public\/)/
+// The files platform writes into every site repo that change neither what is built nor how: CoderizeHQ/platform
+// tofu/sites.tf, local.site_files, less deploy-preview.yml. Keep this in step with it. deploy-preview.yml is left out on
+// purpose: a push runs the workflow file at that commit, so a sync of it changes how that commit's stored build is made,
+// and the first build made that way goes live only with James's release. A file that is part of the build
+// (BUILD_INPUT) is never exempt, even if platform starts managing it.
+export const PLATFORM_FILES = new Set(['.github/workflows/release.yml', '.github/CODEOWNERS', 'renovate.json'])
+const BUILD_INPUT =
+  /^(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|astro\.config\.|src\/|public\/|\.github\/workflows\/deploy-preview\.yml$)/
 
 /**
  * Why a commit that isn't a PR merge is not platform's file sync, or [] when it is one.
@@ -185,7 +183,10 @@ export function decideDependencyRun(facts) {
     if (pr.statusCount > 0 && pr.statusState !== 'success') reasons.push(`${n}: commit status is ${pr.statusState}`)
   }
   if (facts.commits.length === 0) reasons.push('main is ahead of the last release but no commits were listed')
-  return { ok: reasons.length === 0, nothing: false, reasons, prs: facts.commits.map((c) => c.pr?.number).filter(Boolean) }
+  const prs = facts.commits.map((c) => c.pr?.number).filter(Boolean)
+  // A gap of platform syncs alone changes nothing that is built, so there is nothing to publish.
+  if (reasons.length === 0 && prs.length === 0) return { ok: true, nothing: true, reasons, prs }
+  return { ok: reasons.length === 0, nothing: false, reasons, prs }
 }
 
 /**

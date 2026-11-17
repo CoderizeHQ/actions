@@ -240,8 +240,8 @@ async function verifyMain() {
   const result = await verify({ token, repo, ref, sha: checkSha(sha) })
   output('publish', String(result.publish))
   if (result.nothing) {
-    console.log('::notice::nothing merged since the last release; nothing to publish')
-    summary('Nothing merged since the last release; nothing published.')
+    console.log('::notice::no dependency update since the last release; nothing to publish')
+    summary('No dependency update since the last release (only platform syncs, if anything); nothing published.')
     return
   }
   if (!result.publish) {

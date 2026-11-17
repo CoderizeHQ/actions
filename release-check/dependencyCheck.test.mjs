@@ -155,7 +155,17 @@ test('a direct commit is refused unless it is exactly a platform sync of the fil
 
 test('the files platform syncs are never build inputs', () => {
   assert.deepEqual(platformSyncProblems(sync({ files: [{ name: '.github/CODEOWNERS', status: 'modified' }] })), [])
-  assert.deepEqual(platformSyncProblems(sync({ files: [{ name: '.github/workflows/deploy-preview.yml', status: 'added' }] })), [])
+  assert.deepEqual(platformSyncProblems(sync({ files: [{ name: 'renovate.json', status: 'added' }] })), [])
+  // deploy-preview.yml decides how the commit is built, so a sync of it waits for James.
+  assert.match(
+    platformSyncProblems(sync({ files: [{ name: '.github/workflows/deploy-preview.yml', status: 'modified' }] })).join(' '),
+    /changes \.github\/workflows\/deploy-preview\.yml/,
+  )
+})
+
+test('a gap of platform syncs alone publishes nothing', () => {
+  const r = decideDependencyRun(facts({ commits: [{ sha: 's1', pr: null, commit: sync() }] }))
+  assert.deepEqual(r, { ok: true, nothing: true, reasons: [], prs: [] })
 })
 
 const pkgJson = (packageManager, extra = {}) =>
