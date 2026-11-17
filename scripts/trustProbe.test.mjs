@@ -34,6 +34,13 @@ test('a preview-only live-account record ("live": false) gets its preview role, 
   assert.ok(!arns.some((a) => a.includes('live-publish')))
 })
 
+test('a live-account record with "live": true, or without the field, still gets its publish role', () => {
+  for (const extra of [{ live: true }, {}]) {
+    const arns = targets([{ site: 'live-com', repo: 'live-com-web', repo_id: 1460000011, account: 'live', ...extra }]).map((t) => t.arn)
+    assert.ok(arns.includes('arn:aws:iam::243891826043:role/coderizehq-live-publish-live-com'))
+  }
+})
+
 test("a platform PR's token differs from each role's trust in the ways the README lists", () => {
   const [preview, live, , deploy] = targets(SITES)
   assert.deepEqual(differences(PR_CLAIMS, preview.trusted), [
