@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/CoderizeHQ/actions/compare/v1.1.0...v1.1.1) (2026-11-17)
+
+
+### Bug Fixes
+
+* let platform's file syncs and pnpm updates through the dependency check ([#28](https://github.com/CoderizeHQ/actions/issues/28)) ([9bcbf31](https://github.com/CoderizeHQ/actions/commit/9bcbf31df9f2a467b4969794425ecf8dac87c9dc))
+
 ## [1.1.0](https://github.com/CoderizeHQ/actions/compare/v1.0.5...v1.1.0) (2026-11-16)
 
 
