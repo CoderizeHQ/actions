@@ -25,6 +25,30 @@ export async function gh(token, path, { method = 'GET', body } = {}) {
 }
 
 /**
+ * Walks a cursor-paged list (the `Link: rel="next"` header) until `found` returns a value, or the list ends.
+ * @template T
+ * @param {string} token @param {string} path @param {(item: any) => T | undefined} found
+ * @param {number} [maxPages]
+ * @returns {Promise<T | undefined>}
+ */
+export async function ghFind(token, path, found, maxPages = 20) {
+  let url = `${API}${path}`
+  for (let page = 0; url && page < maxPages; page++) {
+    const res = await fetch(url, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+    })
+    if (res.status === 404) return undefined
+    if (!res.ok) throw new Error(`GET ${path.split('?')[0]}: ${res.status}`)
+    for (const item of (await res.json()) ?? []) {
+      const v = found(item)
+      if (v !== undefined) return v
+    }
+    url = /<([^>]+)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1]
+  }
+  return undefined
+}
+
+/**
  * Every item of a paged list. `pick` gets each page's body and returns its items (for endpoints that wrap them).
  * @param {string} token @param {string} path @param {(page: any) => any[]} [pick]
  */

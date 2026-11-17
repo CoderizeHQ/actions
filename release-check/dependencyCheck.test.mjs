@@ -112,6 +112,7 @@ test('a direct push, another branch, extra files, unverified commits or a failed
 
 // Platform's file sync: as the platform App writes it straight to main (loadtimecheck-com-web 1241ded, 2026-11-16).
 const sync = (over = {}) => ({
+  pusherId: PLATFORM_ID,
   authorId: PLATFORM_ID,
   committerId: WEB_FLOW_ID,
   verified: true,
@@ -144,6 +145,8 @@ test('a direct commit is refused unless it is exactly a platform sync of the fil
   refuse(sync({ files: [{ name: 'src/pages/index.astro', status: 'modified' }] }), /changes src\/pages\/index.astro/)
   refuse(sync({ files: [{ name: 'renovate.json', status: 'modified' }, { name: 'package.json', status: 'modified' }] }), /changes package.json/)
   refuse(sync({ authorId: 74272118 }), /not written by the platform App/)
+  refuse(sync({ pusherId: 74272118 }), /platform App pushing it/)
+  refuse(sync({ pusherId: null }), /platform App pushing it/)
   refuse(sync({ committerId: PLATFORM_ID }), /GitHub made and signed/)
   refuse(sync({ verified: false }), /GitHub made and signed/)
   refuse(sync({ parents: 2 }), /merge commit/)

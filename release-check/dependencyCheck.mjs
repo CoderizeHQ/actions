@@ -19,7 +19,7 @@
 
 import { isDeepStrictEqual } from 'node:util'
 
-import { gh, ghAll } from '../scripts/lib/github.mjs'
+import { gh, ghAll, ghFind } from '../scripts/lib/github.mjs'
 import { RELEASE_BOT_ID } from './releaseCheck.mjs'
 
 export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's self-hosted Renovate App (5775623)
@@ -37,13 +37,14 @@ const NEVER_EXEMPT =
 
 /**
  * Why a commit that isn't a PR merge is not platform's file sync, or [] when it is one.
- * @param {{ authorId: number | null, committerId: number | null, verified: boolean, parents: number,
+ * @param {{ pusherId: number | null, authorId: number | null, committerId: number | null, verified: boolean, parents: number,
  *   files: { name: string, status: string, previous?: string | null }[], filesComplete: boolean } | null | undefined} c
  * @returns {string[]}
  */
 export function platformSyncProblems(c) {
   if (!c) return ['its details could not be read']
   const problems = []
+  if (c.pusherId !== PLATFORM_ID) problems.push("GitHub doesn't record the platform App pushing it to main")
   if (c.authorId !== PLATFORM_ID) problems.push('it was not written by the platform App')
   if (c.committerId !== WEB_FLOW_ID || !c.verified) problems.push('it is not a commit GitHub made and signed for an App')
   if (c.parents !== 1) problems.push('it is a merge commit')
@@ -227,11 +228,23 @@ export async function checkDependencyRun(token, repo, head) {
 
 /** A commit's author, committer, signature, parents and files, for platformSyncProblems. */
 async function readCommit(token, repo, sha) {
-  const c = await gh(token, `/repos/${repo}/commits/${sha}`)
+  // Every page of the commit's files, not just the first: a page can stop short of the whole list. The first page also
+  // carries the commit's details.
+  let c = null
+  const files = await ghAll(token, `/repos/${repo}/commits/${sha}`, (page) => {
+    c ??= page
+    return page?.files ?? []
+  })
   if (!c) return null
-  // Every page of the commit's files, not just the first: a page can stop short of the whole list.
-  const files = await ghAll(token, `/repos/${repo}/commits/${sha}`, (page) => page?.files ?? [])
+  // Who pushed it to main: GitHub's record of the branch update, which, unlike the author, no commit can set. Only
+  // the platform App's own pushes are looked at; none found means no exemption.
+  const pusherId = await ghFind(
+    token,
+    `/repos/${repo}/activity?ref=refs/heads/main&activity_type=push&actor=${encodeURIComponent('coderizehq-platform[bot]')}&per_page=100`,
+    (a) => (a.after === sha ? (a.actor?.id ?? null) : undefined),
+  )
   return {
+    pusherId: pusherId ?? null,
     authorId: c.author?.id ?? null,
     committerId: c.committer?.id ?? null,
     verified: Boolean(c.commit?.verification?.verified),
