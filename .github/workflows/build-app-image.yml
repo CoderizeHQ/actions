@@ -63,15 +63,17 @@ jobs:
           [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of build-app-image.yml this run uses"; exit 1; }
           echo "sha=$shas" >> "$GITHUB_OUTPUT"
 
+      # Both checkouts under the workspace (actions/checkout allows nothing else): the app in app/, this repo in actions/.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          path: app
           persist-credentials: false
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: CoderizeHQ/actions
           ref: ${{ steps.self.outputs.sha }}
-          path: ${{ runner.temp }}/actions
+          path: actions
           persist-credentials: false
 
       - name: Setup pnpm and Node
@@ -79,20 +81,26 @@ jobs:
         with:
           runtime: node@26
           install: false
+          working-directory: app
 
       # Before anything from the app runs: the repo must install ARM64 packages and inject workspace packages.
       - name: Check pnpm-workspace.yaml
+        working-directory: app
         env:
           APP: ${{ inputs.app }}
-        run: node "$RUNNER_TEMP/actions/scripts/appImage.mjs" check
+        run: node ../actions/scripts/appImage.mjs check
 
       - run: pnpm install --frozen-lockfile
+        working-directory: app
 
       - name: Build and copy out the app's production files
+        working-directory: app
         env:
           PACKAGE: ${{ inputs.package }}
           ENTRY: ${{ inputs.entry }}
         run: |
+          matches=$(pnpm --filter "$PACKAGE" list --depth -1 --json | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).length))')
+          [ "$matches" = 1 ] || { echo "::error::package $PACKAGE matches $matches packages, not one"; exit 1; }
           pnpm --filter "$PACKAGE" run --if-present build
           pnpm --filter "$PACKAGE" deploy --prod "$RUNNER_TEMP/app"
           [ -f "$RUNNER_TEMP/app/$ENTRY" ] || { echo "::error::$ENTRY isn't in the app's production files"; exit 1; }

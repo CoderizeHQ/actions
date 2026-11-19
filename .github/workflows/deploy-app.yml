@@ -9,7 +9,8 @@ name: deploy-app
 # from newer builds. Nothing is built here.
 #
 # It runs in the app repo's `release` environment as coderizehq-app-deploy-<app>, which trusts only this file at v1 or
-# v1.*, in that environment, from a version tag or main, and may only run coderizehq-deploy-<app> on the app server.
+# v1.*, in that environment, from a version tag or main. It may run only coderizehq-deploy-<app> on the app server,
+# read and tag only its own ECR repository, find the server (ec2:DescribeInstances) and read Run Command results.
 on:
   workflow_call:
     inputs:

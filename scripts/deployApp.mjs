@@ -11,7 +11,7 @@ import { checkApp, checkCommit, repositoryName } from './appImage.mjs'
 import { runIfMain, summary } from './lib/report.mjs'
 
 export const SERVER_NAME = 'coderizehq-app-server'
-const DONE = new Set(['Success', 'Failed', 'Cancelled', 'TimedOut', 'Cancelling'])
+const DONE = new Set(['Success', 'Failed', 'Cancelled', 'TimedOut'])
 
 export async function deployApp({ aws, app, commit, wait = (ms) => new Promise((r) => setTimeout(r, ms)), pollMs = 10_000, maxPolls = 186, log = console.log }) {
   checkApp(app)
