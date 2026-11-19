@@ -1,6 +1,6 @@
-// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, and notify.mjs
-// a `mailer`, so the tests (and a dry run) hand them an in-memory fake instead. Credentials come from
-// configure-aws-credentials.
+// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, notify.mjs a
+// `mailer`, and appImage.mjs and deployApp.mjs their ECR, EC2 and SSM calls, so the tests (and a dry run) hand them
+// an in-memory fake instead. Credentials come from configure-aws-credentials.
 
 import { CloudFrontClient, CreateInvalidationCommand, ListDistributionsCommand, waitUntilInvalidationCompleted } from '@aws-sdk/client-cloudfront'
 import {
@@ -12,7 +12,10 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
+import { DescribeInstancesCommand, EC2Client } from '@aws-sdk/client-ec2'
+import { DescribeImagesCommand, ECRClient, GetAuthorizationTokenCommand } from '@aws-sdk/client-ecr'
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2'
+import { GetCommandInvocationCommand, SendCommandCommand, SSMClient } from '@aws-sdk/client-ssm'
 
 import { sha256Base64ToHex, sha256HexToBase64 } from './files.mjs'
 
@@ -167,6 +170,68 @@ export function awsMailer() {
         }),
       )
       return res.MessageId
+    },
+  }
+}
+
+// ECR, as coderizehq-app-build-<app> (appImage.mjs push).
+export function awsImages() {
+  const ecr = new ECRClient({ region: REGION })
+  return {
+    async hasTag(repository, tag) {
+      try {
+        await ecr.send(new DescribeImagesCommand({ repositoryName: repository, imageIds: [{ imageTag: tag }] }))
+        return true
+      } catch (err) {
+        if (err?.name === 'ImageNotFoundException') return false
+        throw err
+      }
+    },
+
+    /** The registry password for `AWS`, good for 12 hours. Never logged. */
+    async loginPassword() {
+      const res = await ecr.send(new GetAuthorizationTokenCommand({}))
+      return Buffer.from(res.authorizationData[0].authorizationToken, 'base64').toString('utf8').replace(/^AWS:/, '')
+    },
+  }
+}
+
+// ECR, EC2 and Systems Manager, as coderizehq-app-deploy-<app> (deployApp.mjs).
+export function awsDeploy() {
+  const ec2 = new EC2Client({ region: REGION })
+  const ssm = new SSMClient({ region: REGION })
+  return {
+    hasTag: awsImages().hasTag,
+
+    /** The running instances tagged Name=<name>. */
+    async instances(name) {
+      const res = await ec2.send(
+        new DescribeInstancesCommand({
+          Filters: [
+            { Name: 'tag:Name', Values: [name] },
+            { Name: 'instance-state-name', Values: ['running'] },
+          ],
+        }),
+      )
+      return (res.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.InstanceId)
+    },
+
+    async send({ document, instanceId, parameters, comment }) {
+      const res = await ssm.send(
+        new SendCommandCommand({ DocumentName: document, InstanceIds: [instanceId], Parameters: parameters, Comment: comment }),
+      )
+      return res.Command.CommandId
+    },
+
+    /** The command's result on the instance, or null while SSM hasn't registered it yet. */
+    async invocation(commandId, instanceId) {
+      try {
+        const res = await ssm.send(new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }))
+        return { status: res.Status, stdout: res.StandardOutputContent ?? '', stderr: res.StandardErrorContent ?? '' }
+      } catch (err) {
+        if (err?.name === 'InvocationDoesNotExist') return null
+        throw err
+      }
     },
   }
 }
