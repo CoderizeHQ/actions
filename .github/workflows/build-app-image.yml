@@ -1,0 +1,201 @@
+name: build-app-image
+
+# An app repo's workflow calls this on every pull request and every push to main (platform docs/apps.md, "Images"):
+#   uses: CoderizeHQ/actions/.github/workflows/build-app-image.yml@v1
+#   with: { app: maverick-admin, package: ./apps/api, entry: dist/server.js }
+# It builds the app's image for Linux ARM64 (the app server is a t4g) without Docker (STANDARDS.md 6): pnpm installs
+# the app's production files with their ARM64 packages, and crane adds them as one layer on the pinned Node base
+# image. A pull request only builds it, so a broken build fails the PR; main also pushes it to ECR, tagged with the
+# commit, for deploy-app.
+#
+# Two jobs, so neither the app's own code nor crane ever runs where AWS credentials exist: `build` installs, builds
+# and assembles with no role, and `push` only uploads the image `build` made, through ECR's own API in Node. The push role, coderizehq-app-build-<app>, trusts only this file at
+# v1 or v1.*, from the app's repo on main; its ARN comes from `app`, never from an input.
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: The app's name, as in platform/apps/<app>.json
+        type: string
+        required: true
+      package:
+        description: The app's pnpm package, as a --filter (./apps/api)
+        type: string
+        required: true
+      entry:
+        description: The file node runs, relative to the package (dist/server.js)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  # Node 26 (STANDARDS.md 3) on Debian, for ARM64 among others; crane picks the linux/arm64 image. A bump is a PR.
+  BASE_IMAGE: node:26-trixie-slim@sha256:e6bedef217677b276c591795e169840edd9096dbf13f29df8ef8d1856b8820bc
+  # go-containerregistry's crane, checked against the checksum its release publishes.
+  CRANE_VERSION: v0.22.1
+  CRANE_SHA256: 0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
+
+jobs:
+  build:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check the inputs
+        env:
+          APP: ${{ inputs.app }}
+          ENTRY: ${{ inputs.entry }}
+        run: |
+          [[ "$APP" =~ ^[a-z][a-z0-9-]{0,29}$ ]] || { echo "::error::app must start with a-z and be at most 30 of a-z, 0-9 and -"; exit 1; }
+          [[ "$ENTRY" =~ ^[A-Za-z0-9_./-]+$ && "$ENTRY" != /* && "$ENTRY" != *..* ]] || { echo "::error::entry is a relative path inside the package"; exit 1; }
+
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/build-app-image.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of build-app-image.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      # Both checkouts under the workspace (actions/checkout allows nothing else): the app in app/, this repo in actions/.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: app
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@26
+          install: false
+          working-directory: app
+
+      # Before anything from the app runs: the repo must install ARM64 packages and inject workspace packages.
+      - name: Check pnpm-workspace.yaml
+        working-directory: app
+        env:
+          APP: ${{ inputs.app }}
+        run: node ../actions/scripts/appImage.mjs check
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: app
+
+      - name: Build and copy out the app's production files
+        working-directory: app
+        env:
+          PACKAGE: ${{ inputs.package }}
+          ENTRY: ${{ inputs.entry }}
+        run: |
+          matches=$(pnpm --filter "$PACKAGE" list --depth -1 --json | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).length))')
+          [ "$matches" = 1 ] || { echo "::error::package $PACKAGE matches $matches packages, not one"; exit 1; }
+          pnpm --filter "$PACKAGE" run --if-present build
+          pnpm --filter "$PACKAGE" deploy --prod "$RUNNER_TEMP/app"
+          [ -f "$RUNNER_TEMP/app/$ENTRY" ] || { echo "::error::$ENTRY isn't in the app's production files"; exit 1; }
+
+      # crane runs only here, in the job with no AWS credentials. The pinned build is for x86-64 runners.
+      - name: Install crane
+        run: |
+          [ "$(uname -m)" = x86_64 ] || { echo "::error::crane is pinned for x86-64 runners; this runner is $(uname -m)"; exit 1; }
+          curl -fsSL -o "$RUNNER_TEMP/crane.tar.gz" \
+            "https://github.com/google/go-containerregistry/releases/download/$CRANE_VERSION/go-containerregistry_Linux_x86_64.tar.gz"
+          echo "$CRANE_SHA256  $RUNNER_TEMP/crane.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/crane.tar.gz" -C "$RUNNER_TEMP/bin" crane
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # One layer at /app, owned by root and read by the image's `node` user (1000), so the app can't change its own
+      # code. Sorted, with fixed times, so the same files make the same layer.
+      - name: Assemble the image (linux/arm64)
+        env:
+          ENTRY: ${{ inputs.entry }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
+            -C "$RUNNER_TEMP/app" --transform 's,^\.,app,' -cf "$RUNNER_TEMP/layer.tar" .
+          crane mutate "$BASE_IMAGE" --platform linux/arm64 \
+            --append "$RUNNER_TEMP/layer.tar" \
+            --workdir /app --user 1000:1000 \
+            --entrypoint node,"$ENTRY" \
+            --env NODE_ENV=production \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=$SOURCE" \
+            -o "$RUNNER_TEMP/image.tar"
+          echo "image: $(du -h "$RUNNER_TEMP/image.tar" | cut -f1)"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        with:
+          name: app-image
+          path: ${{ runner.temp }}/image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+  push:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    concurrency:
+      group: build-app-image-${{ inputs.app }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/build-app-image.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of build-app-image.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@26
+          install: false
+          working-directory: actions
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: actions
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app-image
+          path: ${{ runner.temp }}/app-image
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-app-build-${{ inputs.app }}
+          aws-region: us-east-1
+
+      - name: Push the image to ECR
+        env:
+          APP: ${{ inputs.app }}
+          COMMIT: ${{ github.sha }}
+          IMAGE_TAR: ${{ runner.temp }}/app-image/image.tar
+        run: node actions/scripts/appImage.mjs push

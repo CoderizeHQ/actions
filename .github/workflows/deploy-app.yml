@@ -1,0 +1,82 @@
+name: deploy-app
+
+# An app repo's release workflow calls this from a version tag (the release PR James approved) or main (platform
+# docs/apps.md, "Releases"):
+#   uses: CoderizeHQ/actions/.github/workflows/deploy-app.yml@v1
+#   with: { app: maverick-admin }
+# It deploys the image build-app-image pushed for this commit to the app server, by running the app's own deploy
+# document there, fails unless the document succeeds, and then tags the image release-<sha> in ECR so it's kept apart
+# from newer builds. Nothing is built here.
+#
+# It runs in the app repo's `release` environment as coderizehq-app-deploy-<app>, which trusts only this file at v1 or
+# v1.*, in that environment, from a version tag or main. It may run only coderizehq-deploy-<app> on the app server,
+# read and tag only its own ECR repository, find the server (ec2:DescribeInstances) and read Run Command results.
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: The app's name, as in platform/apps/<app>.json
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    environment: release
+    # One deploy of an app at a time; a running one is never cancelled. The server also queues deploys of different
+    # apps behind its own lock.
+    concurrency:
+      group: deploy-app-${{ inputs.app }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Check the app name
+        env:
+          APP: ${{ inputs.app }}
+        run: |
+          [[ "$APP" =~ ^[a-z][a-z0-9-]{0,29}$ ]] || { echo "::error::app must start with a-z and be at most 30 of a-z, 0-9 and -"; exit 1; }
+
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/deploy-app.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of deploy-app.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@26
+          install: false
+          working-directory: actions
+
+      - run: pnpm install --frozen-lockfile
+        working-directory: actions
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-app-deploy-${{ inputs.app }}
+          aws-region: us-east-1
+
+      - name: Deploy on the app server
+        env:
+          APP: ${{ inputs.app }}
+          COMMIT: ${{ github.sha }}
+        run: node actions/scripts/deployApp.mjs

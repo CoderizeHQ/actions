@@ -1,6 +1,6 @@
-// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, and notify.mjs
-// a `mailer`, so the tests (and a dry run) hand them an in-memory fake instead. Credentials come from
-// configure-aws-credentials.
+// The only file that talks to AWS. deployPreview.mjs and release.mjs take a `store` with these methods, notify.mjs a
+// `mailer`, and appImage.mjs and deployApp.mjs their ECR, EC2 and SSM calls, so the tests (and a dry run) hand them
+// an in-memory fake instead. Credentials come from configure-aws-credentials.
 
 import { CloudFrontClient, CreateInvalidationCommand, ListDistributionsCommand, waitUntilInvalidationCompleted } from '@aws-sdk/client-cloudfront'
 import {
@@ -12,7 +12,19 @@ import {
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3'
+import { DescribeInstancesCommand, EC2Client } from '@aws-sdk/client-ec2'
+import {
+  BatchCheckLayerAvailabilityCommand,
+  BatchGetImageCommand,
+  CompleteLayerUploadCommand,
+  DescribeImagesCommand,
+  ECRClient,
+  InitiateLayerUploadCommand,
+  PutImageCommand,
+  UploadLayerPartCommand,
+} from '@aws-sdk/client-ecr'
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2'
+import { GetCommandInvocationCommand, SendCommandCommand, SSMClient } from '@aws-sdk/client-ssm'
 
 import { sha256Base64ToHex, sha256HexToBase64 } from './files.mjs'
 
@@ -167,6 +179,113 @@ export function awsMailer() {
         }),
       )
       return res.MessageId
+    },
+  }
+}
+
+// ECR, as coderizehq-app-build-<app> (appImage.mjs push).
+export function awsImages() {
+  const ecr = new ECRClient({ region: REGION })
+  return {
+    async hasTag(repository, tag) {
+      try {
+        await ecr.send(new DescribeImagesCommand({ repositoryName: repository, imageIds: [{ imageTag: tag }] }))
+        return true
+      } catch (err) {
+        if (err?.name === 'ImageNotFoundException') return false
+        throw err
+      }
+    },
+
+    async hasBlob(repository, digest) {
+      const res = await ecr.send(new BatchCheckLayerAvailabilityCommand({ repositoryName: repository, layerDigests: [digest] }))
+      return res.layers?.[0]?.layerAvailability === 'AVAILABLE'
+    },
+
+    /** Uploads one blob in parts of at most 20 MiB (ECR's minimum part is 5 MiB, except the last). */
+    async uploadBlob(repository, digest, bytes) {
+      const { uploadId, partSize } = await ecr.send(new InitiateLayerUploadCommand({ repositoryName: repository }))
+      const size = Math.max(5 * 1024 * 1024, Math.min(partSize ?? 20 * 1024 * 1024, 20 * 1024 * 1024))
+      for (let first = 0; first < bytes.length || first === 0; first += size) {
+        const part = bytes.subarray(first, Math.min(first + size, bytes.length))
+        await ecr.send(
+          new UploadLayerPartCommand({
+            repositoryName: repository,
+            uploadId,
+            partFirstByte: first,
+            partLastByte: first + part.length - 1,
+            layerPartBlob: part,
+          }),
+        )
+        if (part.length < size) break
+      }
+      await ecr.send(new CompleteLayerUploadCommand({ repositoryName: repository, uploadId, layerDigests: [digest] }))
+    },
+
+    async putManifest(repository, tag, manifest, mediaType) {
+      await ecr.send(new PutImageCommand({ repositoryName: repository, imageManifest: manifest, imageManifestMediaType: mediaType, imageTag: tag }))
+    },
+  }
+}
+
+// ECR, EC2 and Systems Manager, as coderizehq-app-deploy-<app> (deployApp.mjs).
+export function awsDeploy() {
+  const ecr = new ECRClient({ region: REGION })
+  const ec2 = new EC2Client({ region: REGION })
+  const ssm = new SSMClient({ region: REGION })
+  return {
+    hasTag: awsImages().hasTag,
+
+    /** Adds `tag` to the image tagged `from` (same manifest). A tag already there is left as it is. */
+    async addTag(repository, from, tag) {
+      const got = await ecr.send(new BatchGetImageCommand({ repositoryName: repository, imageIds: [{ imageTag: from }] }))
+      const image = got.images?.[0]
+      if (!image) throw new Error(`${repository}:${from} is gone from ECR`)
+      try {
+        await ecr.send(
+          new PutImageCommand({
+            repositoryName: repository,
+            imageManifest: image.imageManifest,
+            imageManifestMediaType: image.imageManifestMediaType,
+            imageTag: tag,
+          }),
+        )
+        return true
+      } catch (err) {
+        if (['ImageAlreadyExistsException', 'ImageTagAlreadyExistsException'].includes(err?.name)) return false
+        throw err
+      }
+    },
+
+    /** The running instances tagged Name=<name>. */
+    async instances(name) {
+      const res = await ec2.send(
+        new DescribeInstancesCommand({
+          Filters: [
+            { Name: 'tag:Name', Values: [name] },
+            { Name: 'instance-state-name', Values: ['running'] },
+          ],
+        }),
+      )
+      return (res.Reservations ?? []).flatMap((r) => r.Instances ?? []).map((i) => i.InstanceId)
+    },
+
+    async send({ document, instanceId, parameters, comment }) {
+      const res = await ssm.send(
+        new SendCommandCommand({ DocumentName: document, InstanceIds: [instanceId], Parameters: parameters, Comment: comment }),
+      )
+      return res.Command.CommandId
+    },
+
+    /** The command's result on the instance, or null while SSM hasn't registered it yet. */
+    async invocation(commandId, instanceId) {
+      try {
+        const res = await ssm.send(new GetCommandInvocationCommand({ CommandId: commandId, InstanceId: instanceId }))
+        return { status: res.Status, stdout: res.StandardOutputContent ?? '', stderr: res.StandardErrorContent ?? '' }
+      } catch (err) {
+        if (err?.name === 'InvocationDoesNotExist') return null
+        throw err
+      }
     },
   }
 }
