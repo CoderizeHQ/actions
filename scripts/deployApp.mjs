@@ -3,8 +3,9 @@
 // 1. checks build-app-image pushed this commit's image;
 // 2. finds the app server (the one running instance named coderizehq-app-server);
 // 3. runs coderizehq-deploy-<app> there with the commit as the tag, and waits for it;
-// 4. prints what the server printed, and fails unless the document ended in Success. The document puts the previous
-//    release back itself when the new one's health check fails.
+// 4. prints what the server printed, and fails unless the document ended in Success (the document leaves the live
+//    release as it was when the new one fails);
+// 5. tags the image release-<sha> in ECR, so the lifecycle keeps the last 3 releases apart from newer builds.
 
 import { checkApp, checkCommit, repositoryName } from './appImage.mjs'
 import { runIfMain, summary } from './lib/report.mjs'
@@ -43,7 +44,10 @@ export async function deployApp({ aws, app, commit, wait = (ms) => new Promise((
   if (result?.stdout) log(result.stdout.trimEnd())
   if (result?.stderr) log(result.stderr.trimEnd())
   if (!result || !DONE.has(result.status)) throw new Error(`${commandId} didn't finish in time; check it in Systems Manager before deploying again`)
-  if (result.status !== 'Success') throw new Error(`the deploy ended ${result.status}; the server kept or put back the previous release if it had one`)
+  if (result.status !== 'Success') throw new Error(`the deploy ended ${result.status}; the live release, if there was one, is as it was`)
+
+  const tagged = await aws.addTag(repositoryName(app), commit, `release-${commit}`)
+  log(tagged ? `tagged release-${commit}` : `release-${commit} was already tagged`)
   return { commandId, instanceId }
 }
 

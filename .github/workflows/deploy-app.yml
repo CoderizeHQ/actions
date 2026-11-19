@@ -5,7 +5,8 @@ name: deploy-app
 #   uses: CoderizeHQ/actions/.github/workflows/deploy-app.yml@v1
 #   with: { app: maverick-admin }
 # It deploys the image build-app-image pushed for this commit to the app server, by running the app's own deploy
-# document there, and fails unless the document succeeds. Nothing is built here.
+# document there, fails unless the document succeeds, and then tags the image release-<sha> in ECR so it's kept apart
+# from newer builds. Nothing is built here.
 #
 # It runs in the app repo's `release` environment as coderizehq-app-deploy-<app>, which trusts only this file at v1 or
 # v1.*, in that environment, from a version tag or main, and may only run coderizehq-deploy-<app> on the app server.

@@ -13,7 +13,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3'
 import { DescribeInstancesCommand, EC2Client } from '@aws-sdk/client-ec2'
-import { DescribeImagesCommand, ECRClient, GetAuthorizationTokenCommand } from '@aws-sdk/client-ecr'
+import { BatchGetImageCommand, DescribeImagesCommand, ECRClient, GetAuthorizationTokenCommand, PutImageCommand } from '@aws-sdk/client-ecr'
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2'
 import { GetCommandInvocationCommand, SendCommandCommand, SSMClient } from '@aws-sdk/client-ssm'
 
@@ -198,10 +198,32 @@ export function awsImages() {
 
 // ECR, EC2 and Systems Manager, as coderizehq-app-deploy-<app> (deployApp.mjs).
 export function awsDeploy() {
+  const ecr = new ECRClient({ region: REGION })
   const ec2 = new EC2Client({ region: REGION })
   const ssm = new SSMClient({ region: REGION })
   return {
     hasTag: awsImages().hasTag,
+
+    /** Adds `tag` to the image tagged `from` (same manifest). A tag already there is left as it is. */
+    async addTag(repository, from, tag) {
+      const got = await ecr.send(new BatchGetImageCommand({ repositoryName: repository, imageIds: [{ imageTag: from }] }))
+      const image = got.images?.[0]
+      if (!image) throw new Error(`${repository}:${from} is gone from ECR`)
+      try {
+        await ecr.send(
+          new PutImageCommand({
+            repositoryName: repository,
+            imageManifest: image.imageManifest,
+            imageManifestMediaType: image.imageManifestMediaType,
+            imageTag: tag,
+          }),
+        )
+        return true
+      } catch (err) {
+        if (['ImageAlreadyExistsException', 'ImageTagAlreadyExistsException'].includes(err?.name)) return false
+        throw err
+      }
+    },
 
     /** The running instances tagged Name=<name>. */
     async instances(name) {
