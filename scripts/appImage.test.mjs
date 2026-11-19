@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { test } from 'node:test'
+import { gzipSync } from 'node:zlib'
 
-import { checkApp, checkCommit, checkWorkspace, pushImage, REGISTRY } from './appImage.mjs'
+import { checkApp, checkCommit, checkWorkspace, imageFromTar, pushImage, REGISTRY } from './appImage.mjs'
 
 const good = `packages:
   - apps/*
@@ -35,36 +37,73 @@ test('checkWorkspace names each missing setting', () => {
   assert.deepEqual(checkWorkspace(good.replace('true', 'false')), ['injectWorkspacePackages must be true'])
 })
 
-const fakes = (tags = []) => {
+// A ustar archive, as crane writes an image tarball.
+function tar(files) {
+  const blocks = []
+  for (const [name, body] of Object.entries(files)) {
+    const header = Buffer.alloc(512)
+    header.write(name, 0, 100, 'utf8')
+    header.write('0000644\0', 100)
+    header.write(body.length.toString(8).padStart(11, '0') + '\0', 124)
+    header.write('0', 156)
+    header.write('ustar\0', 257)
+    blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512))
+  }
+  return Buffer.concat([...blocks, Buffer.alloc(1024)])
+}
+
+const config = Buffer.from('{"architecture":"arm64","os":"linux"}')
+const layer = gzipSync(Buffer.from('app files'))
+const digest = (b) => `sha256:${createHash('sha256').update(b).digest('hex')}`
+const imageTar = tar({
+  'manifest.json': Buffer.from(JSON.stringify([{ Config: 'sha256:aaaa', RepoTags: [], Layers: ['bbbb.tar.gz'] }])),
+  'sha256:aaaa': config,
+  'bbbb.tar.gz': layer,
+})
+
+test('imageFromTar builds the manifest from the bytes, not the file names', () => {
+  const { manifest, blobs } = imageFromTar(imageTar)
+  assert.equal(manifest.config.digest, digest(config))
+  assert.deepEqual(manifest.layers.map((l) => [l.digest, l.size]), [[digest(layer), layer.length]])
+  assert.deepEqual(blobs.map((b) => b.digest), [digest(config), digest(layer)])
+})
+
+test('imageFromTar refuses a tarball that is not one image with gzipped layers', () => {
+  assert.throws(() => imageFromTar(tar({ 'other.txt': Buffer.from('x') })), /exactly one image/)
+  const plain = tar({
+    'manifest.json': Buffer.from(JSON.stringify([{ Config: 'c', Layers: ['l'] }])),
+    c: config,
+    l: Buffer.from('not gzipped'),
+  })
+  assert.throws(() => imageFromTar(plain), /gzipped/)
+})
+
+const fakeEcr = ({ tags = [], blobs = [] } = {}) => {
   const calls = []
   return {
     calls,
-    ecr: {
-      hasTag: async (repo, tag) => tags.includes(`${repo}:${tag}`),
-      loginPassword: async () => 'secret',
-    },
-    crane: {
-      login: async (registry, password) => calls.push(['login', registry, password]),
-      push: async (tar, ref) => calls.push(['push', tar, ref]),
-    },
+    hasTag: async (repo, tag) => tags.includes(`${repo}:${tag}`),
+    hasBlob: async (repo, d) => blobs.includes(d),
+    uploadBlob: async (repo, d) => calls.push(['upload', repo, d]),
+    putManifest: async (repo, tag, manifest, mediaType) => calls.push(['manifest', repo, tag, JSON.parse(manifest).layers.length, mediaType]),
   }
 }
 
-test('pushImage logs in and pushes the commit tag to the app repository', async () => {
-  const f = fakes()
+test('pushImage uploads the missing blobs, then the manifest under the commit tag', async () => {
+  const ecr = fakeEcr({ blobs: [digest(config)] })
   const commit = 'b'.repeat(40)
-  const res = await pushImage({ ...f, app: 'example-api', commit, imageTar: '/tmp/image.tar', log: () => {} })
+  const res = await pushImage({ ecr, app: 'example-api', commit, imageTar: 'x', read: async () => imageTar, log: () => {} })
   assert.deepEqual(res, { ref: `${REGISTRY}/coderizehq-app-example-api:${commit}`, pushed: true })
-  assert.deepEqual(f.calls, [
-    ['login', REGISTRY, 'secret'],
-    ['push', '/tmp/image.tar', `${REGISTRY}/coderizehq-app-example-api:${commit}`],
+  assert.deepEqual(ecr.calls, [
+    ['upload', 'coderizehq-app-example-api', digest(layer)],
+    ['manifest', 'coderizehq-app-example-api', commit, 1, 'application/vnd.docker.distribution.manifest.v2+json'],
   ])
 })
 
 test('pushImage keeps an image already pushed for the commit (tags are immutable)', async () => {
   const commit = 'c'.repeat(40)
-  const f = fakes([`coderizehq-app-example-api:${commit}`])
-  const res = await pushImage({ ...f, app: 'example-api', commit, imageTar: '/tmp/image.tar', log: () => {} })
+  const ecr = fakeEcr({ tags: [`coderizehq-app-example-api:${commit}`] })
+  const res = await pushImage({ ecr, app: 'example-api', commit, imageTar: 'x', read: async () => imageTar, log: () => {} })
   assert.equal(res.pushed, false)
-  assert.deepEqual(f.calls, [])
+  assert.deepEqual(ecr.calls, [])
 })

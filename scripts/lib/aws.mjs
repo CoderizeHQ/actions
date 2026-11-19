@@ -13,7 +13,16 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3'
 import { DescribeInstancesCommand, EC2Client } from '@aws-sdk/client-ec2'
-import { BatchGetImageCommand, DescribeImagesCommand, ECRClient, GetAuthorizationTokenCommand, PutImageCommand } from '@aws-sdk/client-ecr'
+import {
+  BatchCheckLayerAvailabilityCommand,
+  BatchGetImageCommand,
+  CompleteLayerUploadCommand,
+  DescribeImagesCommand,
+  ECRClient,
+  InitiateLayerUploadCommand,
+  PutImageCommand,
+  UploadLayerPartCommand,
+} from '@aws-sdk/client-ecr'
 import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2'
 import { GetCommandInvocationCommand, SendCommandCommand, SSMClient } from '@aws-sdk/client-ssm'
 
@@ -188,10 +197,33 @@ export function awsImages() {
       }
     },
 
-    /** The registry password for `AWS`, good for 12 hours. Never logged. */
-    async loginPassword() {
-      const res = await ecr.send(new GetAuthorizationTokenCommand({}))
-      return Buffer.from(res.authorizationData[0].authorizationToken, 'base64').toString('utf8').replace(/^AWS:/, '')
+    async hasBlob(repository, digest) {
+      const res = await ecr.send(new BatchCheckLayerAvailabilityCommand({ repositoryName: repository, layerDigests: [digest] }))
+      return res.layers?.[0]?.layerAvailability === 'AVAILABLE'
+    },
+
+    /** Uploads one blob in parts of at most 20 MiB (ECR's minimum part is 5 MiB, except the last). */
+    async uploadBlob(repository, digest, bytes) {
+      const { uploadId, partSize } = await ecr.send(new InitiateLayerUploadCommand({ repositoryName: repository }))
+      const size = Math.max(5 * 1024 * 1024, Math.min(partSize ?? 20 * 1024 * 1024, 20 * 1024 * 1024))
+      for (let first = 0; first < bytes.length || first === 0; first += size) {
+        const part = bytes.subarray(first, Math.min(first + size, bytes.length))
+        await ecr.send(
+          new UploadLayerPartCommand({
+            repositoryName: repository,
+            uploadId,
+            partFirstByte: first,
+            partLastByte: first + part.length - 1,
+            layerPartBlob: part,
+          }),
+        )
+        if (part.length < size) break
+      }
+      await ecr.send(new CompleteLayerUploadCommand({ repositoryName: repository, uploadId, layerDigests: [digest] }))
+    },
+
+    async putManifest(repository, tag, manifest, mediaType) {
+      await ecr.send(new PutImageCommand({ repositoryName: repository, imageManifest: manifest, imageManifestMediaType: mediaType, imageTag: tag }))
     },
   }
 }
