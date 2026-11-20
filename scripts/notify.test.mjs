@@ -101,6 +101,6 @@ test('the role ARN is the fixed live-account notify role', () => {
 
 test("a go-live release is named as such, and says it went to the new distribution before the alias move", () => {
   const ok = message({ ...base, workflow: 'release', ref: 'refs/heads/main', results: 'verify=success,publish=success', kind: 'go-live', siteUrl: 'https://d111111abcdef8.cloudfront.net' })
-  assert.equal(ok.subject, '[CoderizeHQ] released sbmcdn-com go-live release')
+  assert.equal(ok.subject, '[CoderizeHQ] released sbmcdn-com (go-live)')
   assert.match(ok.text, /^Release: go-live, main's head on the new distribution before its alias move \(platform's apply\)$/m)
 })

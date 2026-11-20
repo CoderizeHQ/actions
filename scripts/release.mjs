@@ -6,7 +6,7 @@
 // - main (the weekly dependency run): release-check/dependencyCheck.mjs;
 // - main, from the repository_dispatch `go-live-release` that platform's apply sends as the platform App for a site
 //   whose new distribution has no aliases yet (GO_LIVE below): its first publish, which publish refuses for a
-//   distribution serving any name, so it never reaches a visitor before James's alias move;
+//   distribution serving any name, so it never lands on the site's domain before James's alias move;
 // - anything else is refused.
 //
 // `node release.mjs publish` (the release environment, as coderizehq-live-publish-<site>) then:
@@ -52,10 +52,11 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 /**
  * A site's go-live release (platform docs/go-live.md, "Zero-downtime cutover"): platform's apply sends the site's repo
  * this repository_dispatch, as the platform App, for a site going live by an alias move whose new distribution has no
- * aliases yet. It publishes main's head, so the site's first publish needs no release PR and no Release-As commit, and
- * it can't reach a visitor: publish refuses a distribution that serves any name (only its own *.cloudfront.net name
- * answers until James runs platform's alias-move.yml, which checks the site first). Everything a visitor sees later
- * still goes through a version release.
+ * aliases yet. It publishes main's head, so the site's first publish needs no release PR and no Release-As commit. It
+ * never lands on the site's domain: publish refuses a distribution that serves any name, before and again right after
+ * waiting for the stored build, so only the new distribution's own *.cloudfront.net name (public, but linked from
+ * nowhere) serves it until James runs platform's alias-move.yml, which checks the site first. After the move, the
+ * site's releases are version releases as usual.
  */
 export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platform[bot]'] }
 
@@ -288,7 +289,8 @@ export const KINDS = ['version', 'dependency', 'go-live']
 export function describe({ kind, pr, approver, prs }) {
   if (kind === 'version') return `release PR #${pr}, approved by ${approver}`
   if (kind === 'go-live') return "go-live release of main's head, before the alias move"
-  return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}`
+  if (kind === 'dependency') return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}`
+  throw new Error(`unknown release kind ${kind}`)
 }
 
 /**
@@ -361,6 +363,13 @@ async function publishMain() {
   // The manifest first, so the deployment record names it from the start.
   const stored = await waitForManifest({ store, site, commit })
   base.manifestSha256 = hashes(stored.body).sha256
+  // The wait above can last 20 minutes: a go-live release asks again, right before anything is written, so names that
+  // moved meanwhile stop it.
+  if (env.KIND === 'go-live') {
+    const again = await findLive(store, site)
+    const late = goLiveRefusal(env.KIND, { ...again, site })
+    if (late || again.distributionId !== distributionId) throw new Error(late ?? `${site}'s distribution changed from ${distributionId} to ${again.distributionId} while waiting`)
+  }
 
   const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs })
   const deployment = await gh(token, `/repos/${repo}/deployments`, {

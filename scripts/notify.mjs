@@ -53,7 +53,7 @@ export function message(run) {
   const ref = clean(run.ref, 120)
   const commit = clean(run.commit, 40)
   const tag = ref.startsWith('refs/tags/') ? ref.slice('refs/tags/'.length) : null
-  const what = tag ?? (run.kind === 'go-live' ? 'go-live release' : run.workflow === 'release' ? 'weekly dependency run' : commit.slice(0, 7))
+  const what = tag ?? (run.kind === 'go-live' ? '(go-live)' : run.workflow === 'release' ? 'weekly dependency run' : commit.slice(0, 7))
 
   const subject = ok
     ? `[CoderizeHQ] ${run.workflow === 'release' ? 'released' : 'deployed preview'} ${site} ${what}`

@@ -163,8 +163,10 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
      as the platform App (`coderizehq-platform[bot]`, the only sender accepted), with `client_payload.site` naming the
      site, for a site going live by an alias move whose new distribution has no aliases yet. It publishes main's head,
      so the site's first publish needs no release PR and no `Release-As` commit. `publish` refuses it for a
-     distribution that serves any name, so it can only reach the new distribution's own `*.cloudfront.net` name, never
-     a visitor: James's alias move (platform's `alias-move.yml`) checks that build before the names move. A dispatch
+     distribution that serves any name, and checks that again right before it writes, so it lands only where the
+     new distribution's own `*.cloudfront.net` name serves it (public, but linked from nowhere), never on the site's
+     domain. The domain gets it only through James's alias move (platform's `alias-move.yml`), which checks that
+     build first; from then on the site's releases are version releases as usual. A dispatch
      from anyone else, or naming another site, is refused, never taken for a dependency run;
    - anything else is refused.
 2. `publish` (the `release` environment, the live role; one queue per site):

@@ -258,3 +258,8 @@ test('release.yml hands verify the event, the dispatch, its sender and its site,
   }
   for (const l of wf.split('\n')) if (/run: /.test(l)) assert.doesNotMatch(l, /github\.event\./, l)
 })
+
+test('describe names every kind and refuses an unknown one', () => {
+  assert.equal(describe({ kind: 'version', pr: 9, approver: 'GilbertJames' }), 'release PR #9, approved by GilbertJames')
+  assert.throws(() => describe({ kind: 'manual' }), /unknown release kind manual/)
+})
