@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { test } from 'node:test'
 
-import { MAX_AGE_S, PG_MAJOR, adminUrl, create, databaseName, drop, isOurs, psql, stale, withDatabase } from './testDatabase.mjs'
+import { MAX_AGE_S, PG_MAJOR, adminUrl, create, databaseName, drop, ident, isOurs, psql, stale, withDatabase } from './testDatabase.mjs'
 
 const NOW = Date.parse('2026-11-20T12:00:00Z')
 const NOW_S = NOW / 1000
@@ -17,10 +17,17 @@ test('databaseName is ci_<seconds>_<12 hex>, and isOurs accepts only that shape'
   }
 })
 
-test('stale picks only our databases older than three hours', () => {
+test('stale picks ci-owned databases over three hours old, dated ahead, or not named like ours', () => {
   const old = `ci_${NOW_S - MAX_AGE_S - 1}_000000000001`
   const fresh = `ci_${NOW_S - 60 * 60}_000000000002`
-  assert.deepEqual(stale([old, fresh, 'postgres', 'ci_other'], NOW), [old])
+  const skewed = `ci_${NOW_S + 60}_000000000003`
+  const future = `ci_${NOW_S + 24 * 60 * 60}_000000000004`
+  assert.deepEqual(stale([old, fresh, skewed, future, 'squatter', 'ci_other'], NOW), [old, future, 'squatter', 'ci_other'])
+})
+
+test('ident quotes any name as one identifier', () => {
+  assert.equal(ident('ci_1_x'), '"ci_1_x"')
+  assert.equal(ident('a"; DROP DATABASE "postgres'), '"a""; DROP DATABASE ""postgres"')
 })
 
 test('withDatabase swaps the database and refuses a password or another scheme', () => {
@@ -56,7 +63,7 @@ function fakeRun({ version = `${PG_MAJOR}0006`, names = [], failOn } = {}) {
     sql.push({ url, statement })
     if (failOn && statement.includes(failOn)) throw new Error('database is being accessed by other users\nmore')
     if (statement === 'SHOW server_version_num') return version
-    if (statement.startsWith('SELECT datname')) return names.join('\n')
+    if (statement.startsWith('SELECT encode')) return names.map((n) => Buffer.from(n).toString('hex')).join('\n')
     return ''
   }
   return { run, sql }
@@ -65,7 +72,8 @@ function fakeRun({ version = `${PG_MAJOR}0006`, names = [], failOn } = {}) {
 test('create sweeps stale databases, makes its own and returns a URL without a password', () => {
   const old = `ci_${NOW_S - MAX_AGE_S - 60}_00000000000a`
   const fresh = `ci_${NOW_S - 600}_00000000000b`
-  const { run, sql } = fakeRun({ names: [old, fresh] })
+  const odd = 'x"\n::error::injected'
+  const { run, sql } = fakeRun({ names: [old, fresh, odd] })
   const logs = []
   const made = create({ admin: ADMIN, run, now: NOW, random: fixedRandom, log: (l) => logs.push(l) })
 
@@ -73,6 +81,8 @@ test('create sweeps stale databases, makes its own and returns a URL without a p
   assert.equal(made.url, `postgresql://ci@test-db:5432/ci_${NOW_S}_a1b2c3d4e5f6`)
   const statements = sql.map((s) => s.statement)
   assert.ok(statements.includes(`DROP DATABASE IF EXISTS "${old}" WITH (FORCE)`))
+  assert.ok(statements.includes(`DROP DATABASE IF EXISTS "x""\n::error::injected" WITH (FORCE)`), 'a stray name is swept, quoted')
+  assert.ok(logs.every((l) => !l.includes('\n')), 'a name never starts a new log line')
   assert.ok(!statements.some((s) => s.includes(fresh)), 'a fresh database is left alone')
   assert.equal(statements.at(-1), `CREATE DATABASE "${made.name}"`)
   assert.ok(sql.every((s) => s.url === ADMIN), 'every admin statement goes to the admin URL')
@@ -85,7 +95,7 @@ test('create warns on another Postgres major, and a failed sweep does not stop i
   const logs = []
   const made = create({ admin: ADMIN, run, now: NOW, random: fixedRandom, log: (l) => logs.push(l) })
   assert.ok(logs.some((l) => l.startsWith('::warning::the CI Postgres is major 17')))
-  assert.ok(logs.some((l) => l.startsWith(`::warning::couldn't sweep ${old}`) && !l.includes('more')))
+  assert.ok(logs.some((l) => l.startsWith(`::warning::couldn't sweep "${old}"`) && !l.includes('more')))
   assert.equal(sql.at(-1).statement, `CREATE DATABASE "${made.name}"`)
 })
 

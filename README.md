@@ -108,12 +108,15 @@ itself just before the tests and drops it after them, whatever happened (`script
 - **Who:** the role `ci`: `LOGIN CREATEDB`, not a superuser, and no password. pg_hba trusts `ci` from the jobs network
   (or 127.0.0.1) and refuses every other role over the network. There is no secret to pass or to leak; nothing about
   the database needs masking in the log.
-- **Isolation:** each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never share one. They
-  share the server and the role, so a job's code could open another running job's database on purpose; all it would
-  find is that job's test fixtures.
+- **Separation, not isolation:** each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never
+  share one by accident. They share the server and the role, so a job's own code could, on purpose, open, change or
+  drop another running job's database, or fill the VM server's 1 GB RAM disk. What it can reach is other runs' test
+  fixtures and CI's availability, nothing else: no client data, no credential, nothing outside the VM. Running code
+  there at all takes push access to a private CoderizeHQ repo.
 - **Cleanup:** the drop step runs `if: always()` (`DROP DATABASE ... WITH (FORCE)`). Before making its own, every job
-  drops `ci_` databases over three hours old, best effort: the database is made inside this job, whose timeout is 60
-  minutes, so runner queue time never counts. The VM's server keeps its data on a RAM disk, so a restart empties it.
+  drops, best effort, every database `ci` owns that is over three hours old by its name, dated ahead, or not named
+  like ours (only jobs make databases there). The database is made inside this job, whose timeout is 60 minutes, so
+  runner queue time never counts. The VM's server keeps its data on a RAM disk, so a restart empties it.
 - **The tests** get one URL as both `DATABASE_URL` and `DIRECT_URL` (there is no pooler). The repo's test setup
   must migrate the empty database; ci-node doesn't. **Nothing but test fixtures ever goes in it:** never a dump, a
   restore or a copy of a real database.

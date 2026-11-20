@@ -12,10 +12,14 @@
 // the hosted image they'd need a password, and none has one). There is no password to leak, and the URLs printed here
 // and handed to the tests carry none.
 //
-// Each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never share one. Before making its
-// own, a job drops any `ci_` database older than three hours (best effort): the database is made inside the ci-node
-// job, whose timeout is 60 minutes, so nothing that old is still in use. The tests get the same URL as DATABASE_URL
-// and DIRECT_URL (there is no pooler); the repo's test setup must migrate the empty database.
+// Each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never share one by accident. That is
+// separation, not isolation: every job is the same role on the same server, so a job's code could open another running
+// job's database on purpose (README, ci-node). Before making its own, a job drops, best effort, every database `ci`
+// owns that is over three hours old by its name, dated in the future, or not named like ours at all: on this server
+// only jobs make databases, so those are leftovers or something a job's code made, never anything to keep. The
+// database is made inside the ci-node job, whose timeout is 60 minutes, so nothing three hours old is still in use.
+// The tests get the same URL as DATABASE_URL and DIRECT_URL (there is no pooler); the repo's test setup must migrate
+// the empty database.
 //
 //   node scripts/testDatabase.mjs create        sweeps, makes the database, writes `name`, `url` and `admin` to
 //                                               GITHUB_OUTPUT
@@ -38,15 +42,30 @@ export function databaseName(now = Date.now(), random = randomBytes) {
   return `${PREFIX}${Math.floor(now / 1000)}_${random(6).toString('hex')}`
 }
 
-/** Whether a database is one of ours, by its exact name shape. Everything else on the server is left alone. */
+/** Whether a name has the exact shape ci-node gives a job's database. */
 export function isOurs(name) {
   return NAME.test(name)
 }
 
-/** Our databases older than MAX_AGE_S, by the time in their name. */
+// A clock skew allowance for names dated in the future.
+const FUTURE_S = 5 * 60
+
+/**
+ * Which of the databases `ci` owns to sweep: ours over MAX_AGE_S old or dated more than five minutes ahead, and any
+ * whose name isn't ours (only jobs make databases here, so a stray name is a job's own doing).
+ */
 export function stale(names, now = Date.now()) {
   const nowS = Math.floor(now / 1000)
-  return names.filter((n) => isOurs(n) && nowS - Number(NAME.exec(n)[1]) > MAX_AGE_S)
+  return names.filter((n) => {
+    if (!isOurs(n)) return true
+    const age = nowS - Number(NAME.exec(n)[1])
+    return age > MAX_AGE_S || age < -FUTURE_S
+  })
+}
+
+/** A database name as a quoted identifier. */
+export function ident(name) {
+  return `"${String(name).replaceAll('"', '""')}"`
 }
 
 /** The admin URL pointed at another database. Refuses a URL with a password: this server never has one. */
@@ -98,14 +117,21 @@ export function create({ admin, run = psql, now = Date.now(), random = randomByt
     log(`::warning::the CI Postgres is major ${major || 'unknown'}, but production runs ${PG_MAJOR}`)
   }
 
-  const names = run(admin, `SELECT datname FROM pg_database WHERE datname LIKE 'ci\\_%'`).split('\n').filter(Boolean)
+  // Every database ci owns (never the server's own: postgres and the templates belong to the superuser), hex-encoded so
+  // a name with a newline in it can't split into two.
+  const owned = run(admin, 'SELECT encode(convert_to(datname, $$UTF8$$), $$hex$$) FROM pg_database WHERE datdba = (SELECT oid FROM pg_roles WHERE rolname = current_user)')
+  const names = owned
+    .split('\n')
+    .filter(Boolean)
+    .map((hex) => Buffer.from(hex.trim(), 'hex').toString('utf8'))
   for (const name of stale(names, now)) {
     try {
-      run(admin, `DROP DATABASE IF EXISTS ${quoted(name)} WITH (FORCE)`)
-      log(`Swept the leftover test database ${name}`)
+      run(admin, `DROP DATABASE IF EXISTS ${ident(name)} WITH (FORCE)`)
+      // JSON-quoted: a name a job's code made could hold a newline and a workflow command.
+      log(`Swept the leftover database ${JSON.stringify(name)}`)
     } catch (err) {
       // Another job may be sweeping the same one; the next sweep catches anything left.
-      log(`::warning::couldn't sweep ${name}: ${String(err?.message ?? err).split('\n')[0]}`)
+      log(`::warning::couldn't sweep ${JSON.stringify(name)}: ${String(err?.message ?? err).split('\n')[0]}`)
     }
   }
 
