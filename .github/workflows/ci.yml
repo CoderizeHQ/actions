@@ -3,7 +3,8 @@ name: ci
 # actions' own checks on every PR: ci-node, called by path so the PR's own version of the checks runs. Its tests are
 # every *.test.mjs here (the release and dependency checks, deploy-preview and release against an
 # in-memory S3, the plan comment, axe's page handling and the ci-site, audit and trust-test scripts), and the install
-# proves the lockfile installs, since deploy-preview, release and axe install from it.
+# proves the lockfile installs, since deploy-preview, release and axe install from it. test-database is on so every PR
+# runs the test database end to end: scripts/testDatabase.test.mjs checks the database it was given.
 on:
   pull_request:
     branches: [main]
@@ -15,6 +16,8 @@ permissions:
 jobs:
   ci:
     uses: ./.github/workflows/ci-node.yml
+    with:
+      test-database: true
     permissions:
       contents: read
       actions: read

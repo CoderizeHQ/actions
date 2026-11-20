@@ -11,20 +11,16 @@ name: ci-node
 on:
   workflow_call:
     inputs:
-      # An API whose tests need Postgres (STANDARDS.md 6): a temporary branch of the CI Neon project (no client data,
-      # its main an empty database), made by `testdb-create` before the tests and deleted by `testdb-delete` after
-      # (scripts/neonTestBranch.mjs). Those two jobs hold the API key and run no code from the repo under test. The
-      # tests get DATABASE_URL (pooled) and DIRECT_URL for a role and database made on that branch alone, so nothing
-      # they hold opens the project's main or another run's branch. The repo's test setup migrates the empty database.
-      # The caller passes the key:
+      # An API whose tests need Postgres (STANDARDS.md 6): an empty database for this job alone, made just before the
+      # tests and dropped after them whatever happened (scripts/testDatabase.mjs). It lives on a CI-only Postgres 18 that
+      # holds nothing but test fixtures: the runner VM's `test-db` (CODERIZEHQ_TEST_DB, reachable from job containers
+      # only), or on a GitHub-hosted runner the image's own PostgreSQL 18, started for the job on localhost. The role
+      # `ci` has no password and no superuser; there is no secret to pass. The tests get DATABASE_URL and DIRECT_URL
+      # (the same URL: there is no pooler); the repo's test setup must migrate the empty database.
       #   with: { test-database: true }
-      #   secrets: { NEON_CI_API_KEY: ${{ secrets.NEON_CI_API_KEY }} }
       test-database:
         type: boolean
         default: false
-    secrets:
-      NEON_CI_API_KEY:
-        required: false
 
 permissions:
   contents: read
@@ -35,53 +31,8 @@ env:
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
-  # Makes the test branch. Holds the API key; checks out only actions at this workflow's commit, never the repo under
-  # test, so nothing from a PR runs here.
-  testdb-create:
-    if: inputs.test-database
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      branch: ${{ steps.create.outputs.branch }}
-      host: ${{ steps.create.outputs.host }}
-      password: ${{ steps.create.outputs.password }}
-    steps:
-      - name: Find this workflow's commit
-        id: self
-        env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
-        run: |
-          # In actions itself the workflow commit is the PR's own code, which must never run beside the key.
-          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "::error::test-database is not available in actions' own CI"; exit 1; fi
-          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
-          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
-          echo "sha=$shas" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: CoderizeHQ/actions
-          ref: ${{ steps.self.outputs.sha }}
-          path: actions
-          persist-credentials: false
-
-      - name: Make the test branch
-        id: create
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
-          NODE_OPTIONS: ''
-        run: node actions/scripts/neonTestBranch.mjs create
-
   ci-node:
-    needs: testdb-create
-    # Always runs, so the required check can never pass by being skipped. Its Tests step fails if a test database was
-    # asked for and testdb-create didn't make one.
-    if: ${{ !cancelled() }}
+    # MAX_AGE_S in scripts/testDatabase.mjs (three hours) relies on this timeout.
     timeout-minutes: 60
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
@@ -165,68 +116,46 @@ jobs:
           [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
           pnpm exec eslint .
 
-      # With a test database: URLs for the branch's own role and database (outputs of testdb-create). The API key never
-      # reaches this job. A test database asked for and not made fails here, so the check can't pass without it.
+      # On the runner VM the autoscaler sets CODERIZEHQ_TEST_DB on every job container. On a GitHub-hosted runner (the
+      # RUNNER_LABEL fallback, and actions' own CI) the image's PostgreSQL 18 is started here: pg_hba trusts only the
+      # role `ci` from 127.0.0.1, and the server listens on localhost only. Anything else fails with what's missing.
+      - name: Test database
+        id: testdb
+        if: inputs.test-database
+        env:
+          SCRIPTS: ${{ steps.self.outputs.scripts }}
+        run: |
+          if [ -z "${CODERIZEHQ_TEST_DB:-}" ] && [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            hba=$(compgen -G '/etc/postgresql/*/main/pg_hba.conf' | head -n 1 || true)
+            [ -n "$hba" ] || { echo "::error::test-database: this GitHub-hosted image has no PostgreSQL"; exit 1; }
+            sudo sed -i '1i host all ci 127.0.0.1/32 trust' "$hba"
+            sudo systemctl start postgresql.service
+            for _ in $(seq 1 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+            (cd / && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE ROLE ci LOGIN CREATEDB')
+            export TEST_DB_ADMIN_URL=postgresql://ci@127.0.0.1:5432/postgres
+          fi
+          node "$SCRIPTS/scripts/testDatabase.mjs" create
+
       - name: Tests
         working-directory: repo
         env:
           TEST_DATABASE: ${{ inputs.test-database }}
-          TESTDB_RESULT: ${{ needs.testdb-create.result }}
-          TEST_DB_HOST: ${{ needs.testdb-create.outputs.host }}
-          TEST_DB_PASSWORD: ${{ needs.testdb-create.outputs.password }}
+          TEST_DB_URL: ${{ steps.testdb.outputs.url }}
         run: |
-          if [ "$TEST_DATABASE" = true ]; then
-            if [ "$TESTDB_RESULT" != success ] || [ -z "$TEST_DB_HOST" ] || [ -z "$TEST_DB_PASSWORD" ]; then
-              echo "::error::test-database is on, but testdb-create didn't make a test database (result: $TESTDB_RESULT)"
-              exit 1
-            fi
-            echo "::add-mask::$TEST_DB_PASSWORD"
-          fi
           if ! jq -e '.scripts.test' package.json >/dev/null; then
             echo "::notice::package.json has no test script, so there are no tests to run"
             exit 0
           fi
           if [ "$TEST_DATABASE" = true ]; then
-            export DATABASE_URL="postgresql://ci_tests:${TEST_DB_PASSWORD}@${TEST_DB_HOST}/tests?sslmode=require"
-            export DIRECT_URL="postgresql://ci_tests:${TEST_DB_PASSWORD}@${TEST_DB_HOST/-pooler./.}/tests?sslmode=require"
+            [ -n "$TEST_DB_URL" ] || { echo "::error::test-database is on, but no test database was made"; exit 1; }
+            export DATABASE_URL="$TEST_DB_URL" DIRECT_URL="$TEST_DB_URL"
           fi
-          unset TEST_DB_PASSWORD
           pnpm test
 
-  # Deletes the test branch whatever happened. Holds the API key; like testdb-create, runs no code from the repo.
-  testdb-delete:
-    needs: [testdb-create, ci-node]
-    if: ${{ always() && needs.testdb-create.outputs.branch != '' }}
-    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - name: Find this workflow's commit
-        id: self
+      - name: Drop the test database
+        if: always() && steps.testdb.outputs.name != ''
         env:
-          GH_TOKEN: ${{ github.token }}
-          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
-        run: |
-          # In actions itself the workflow commit is the PR's own code, which must never run beside the key.
-          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "::error::test-database is not available in actions' own CI"; exit 1; fi
-          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
-          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
-          echo "sha=$shas" >> "$GITHUB_OUTPUT"
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: CoderizeHQ/actions
-          ref: ${{ steps.self.outputs.sha }}
-          path: actions
-          persist-credentials: false
-
-      - name: Delete the test branch
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
-          NODE_OPTIONS: ''
-          BRANCH: ${{ needs.testdb-create.outputs.branch }}
-        run: node actions/scripts/neonTestBranch.mjs delete "$BRANCH"
+          SCRIPTS: ${{ steps.self.outputs.scripts }}
+          NAME: ${{ steps.testdb.outputs.name }}
+          TEST_DB_ADMIN_URL: ${{ steps.testdb.outputs.admin }}
+        run: node "$SCRIPTS/scripts/testDatabase.mjs" drop "$NAME"

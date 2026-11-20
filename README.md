@@ -52,7 +52,7 @@ required workflow that isn't there blocks every PR it covers.
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (optional) | `contents: read`, `actions: read` | None, or with `test-database` the `NEON_CI_API_KEY` secret the caller passes, used only in the testdb jobs and scoped to the CI Neon project |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
@@ -97,22 +97,30 @@ The PR title, gitleaks, the audit (all as in ci-site), then install, ESLint (wit
 script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of it, and their titles are
 Conventional Commits too (Release Please reads them).
 
-With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6, no Docker in jobs), `testdb-create` makes a
-temporary branch of the CI Neon project (organization variable `NEON_CI_PROJECT_ID`, no client data, its main an empty
-database) before the tests, and `testdb-delete` deletes it after, whatever happened. Those two jobs hold the
-`NEON_CI_API_KEY` secret and run no code from the repo under test (they check out only actions at this workflow's
-commit). The tests get `DATABASE_URL` (pooled) and `DIRECT_URL` for a role (`ci_tests`) and database (`tests`) made on
-that branch alone, with a password Neon generates: nothing they hold opens the project's main or another run's
-branch, and both go with the branch. The repo's test setup migrates the empty database. **The CI project's main must
-stay empty**, and its owner password never goes to a test. If `test-database` is on and no branch was made, the Tests
-step fails, so `ci / ci-node` can't pass without it. Leftover `ci-` branches over three hours old (longer than the
-60-minute job timeout) are swept first, best effort (`scripts/neonTestBranch.mjs`). The testdb jobs refuse to run in
-this repo's own CI, where the workflow's commit is the PR's own code.
+With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6), the job makes an empty database for
+itself just before the tests and drops it after them, whatever happened (`scripts/testDatabase.mjs`):
 
-Known limits: `NEON_CI_API_KEY` is an organization secret each API repo's ci.yml passes in, and a PR's own ci.yml runs
-on that PR, so someone who can push a branch to an API repo could hand the key to their own code. It reaches only the
-CI project (no client data); the cost would be branches and computes there. The branch role's password shows in the
-ci-node log's step environment; it opens only that run's branch, which the run deletes.
+- **Where:** on the runner VM, the `test-db` container (CoderizeHQ/runners): Postgres 18, as in production, on a RAM
+  disk, on the jobs network with no published port, reachable from job containers only. The autoscaler gives every job
+  `CODERIZEHQ_TEST_DB`. On a GitHub-hosted runner (the `RUNNER_LABEL` fallback, and this repo's own CI) the step
+  starts the image's own PostgreSQL 18 (`ubuntu-26.04`), listening on localhost only. Any other runner fails the step
+  with what's missing, so `ci / ci-node` can't pass without the database.
+- **Who:** the role `ci`: `LOGIN CREATEDB`, not a superuser, and no password. pg_hba trusts `ci` from the jobs network
+  (or 127.0.0.1) and refuses every other role over the network. There is no secret to pass or to leak; nothing about
+  the database needs masking in the log.
+- **Isolation:** each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never share one. They
+  share the server and the role, so a job's code could open another running job's database on purpose; all it would
+  find is that job's test fixtures.
+- **Cleanup:** the drop step runs `if: always()` (`DROP DATABASE ... WITH (FORCE)`). Before making its own, every job
+  drops `ci_` databases over three hours old, best effort: the database is made inside this job, whose timeout is 60
+  minutes, so runner queue time never counts. The VM's server keeps its data on a RAM disk, so a restart empties it.
+- **The tests** get one URL as both `DATABASE_URL` and `DIRECT_URL` (there is no pooler). The repo's test setup
+  must migrate the empty database; ci-node doesn't. **Nothing but test fixtures ever goes in it:** never a dump, a
+  restore or a copy of a real database.
+
+This repo's own `ci.yml` turns `test-database` on. This repo is public and `RUNNER_LABEL` reaches only private repos,
+so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
+`scripts/testDatabase.test.mjs` checks the database it was given is empty, writable, Postgres 18, and not a superuser's.
 
 ### deploy-preview
 
