@@ -52,7 +52,7 @@ required workflow that isn't there blocks every PR it covers.
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (optional) | `contents: read`, `actions: read` | None, or with `test-database` the `NEON_CI_API_KEY` (only in the testdb jobs) and `NEON_CI_DATABASE_PASSWORD` secrets the caller passes, both for the CI Neon project only |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (optional) | `contents: read`, `actions: read` | None, or with `test-database` the `NEON_CI_API_KEY` secret the caller passes, used only in the testdb jobs and scoped to the CI Neon project |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
@@ -101,10 +101,12 @@ With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6, no
 temporary branch of the CI Neon project (organization variable `NEON_CI_PROJECT_ID`, no client data, its main an empty
 database) before the tests, and `testdb-delete` deletes it after, whatever happened. Those two jobs hold the
 `NEON_CI_API_KEY` secret and run no code from the repo under test (they check out only actions at this workflow's
-commit). The tests get `DATABASE_URL` (pooled) and `DIRECT_URL`, built from the branch's host and the
-`NEON_CI_DATABASE_PASSWORD` secret, which opens nothing but empty CI databases; the repo's test setup migrates the
-empty database. Leftover `ci-` branches over three hours old (longer than the 60-minute job timeout) are swept first
-(`scripts/neonTestBranch.mjs`).
+commit). The tests get `DATABASE_URL` (pooled) and `DIRECT_URL` for a role (`ci_tests`) and database (`tests`) made on
+that branch alone, with a password Neon generates: nothing they hold opens the project's main or another run's
+branch, and both go with the branch. The repo's test setup migrates the empty database. **The CI project's main must
+stay empty**, and its owner password never goes to a test. If `test-database` is on and no branch was made, the Tests
+step fails, so `ci / ci-node` can't pass without it. Leftover `ci-` branches over three hours old (longer than the
+60-minute job timeout) are swept first, best effort (`scripts/neonTestBranch.mjs`).
 
 ### deploy-preview
 

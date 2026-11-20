@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { API, MAX_AGE_MS, branchName, create, neon, pooledHost, stale } from './neonTestBranch.mjs'
+import { API, DATABASE, MAX_AGE_MS, ROLE, branchName, create, neon, pooledHost, stale, sweep } from './neonTestBranch.mjs'
 
 test('branchName names the run, and refuses anything odd', () => {
   assert.equal(branchName({ repository: 'CoderizeHQ/mrleejunkcarbuyer-com-mono', runId: '123', attempt: '2' }), 'ci-mrleejunkcarbuyer-com-mono-123-2')
@@ -44,25 +44,51 @@ function fakeFetch(routes) {
   return { calls, fetchImpl }
 }
 
-test('create sweeps leftovers, makes the branch, and outputs only the id and the pooled host', async () => {
+test('create sweeps leftovers, makes the branch with its own role and database, and outputs id, host and that password', async () => {
   const old = new Date(Date.now() - MAX_AGE_MS - 60000).toISOString()
   const { calls, fetchImpl } = fakeFetch({
     'GET /projects/proj/branches': { branches: [{ id: 'br-old', name: 'ci-r-9-1', created_at: old }] },
     'DELETE /projects/proj/branches/br-old': {},
-    'POST /projects/proj/branches': { branch: { id: 'br-new' }, endpoints: [{ host: 'ep-x.c-1.aws.neon.tech' }], connection_uris: [{ connection_uri: 'postgresql://u:secret@ep-x.c-1.aws.neon.tech/neondb' }] },
+    'POST /projects/proj/branches': {
+      branch: { id: 'br-new' },
+      endpoints: [{ host: 'ep-x.c-1.aws.neon.tech' }],
+      connection_uris: [{ connection_uri: 'postgresql://neondb_owner:dummy@ep-x.c-1.aws.neon.tech/neondb' }],
+    },
+    'POST /projects/proj/branches/br-new/roles': { role: { name: 'ci_tests', password: 'branchpw' } },
+    'POST /projects/proj/branches/br-new/databases': { database: { name: 'tests' } },
   })
   const outputs = {}
-  const got = await create(neon({ apiKey: 'k', projectId: 'proj', fetchImpl }), 'ci-r-1-1', (k, v) => (outputs[k] = v))
+  const got = await create(neon({ apiKey: 'k', projectId: 'proj', fetchImpl }), 'ci-r-1-1', (k, v) => (outputs[k] = v), () => {})
   assert.deepEqual(
-    calls.map((c) => c.method),
-    ['GET', 'DELETE', 'POST'],
+    calls.map((c) => `${c.method} ${c.url.replace(API, '').split('?')[0]}`),
+    [
+      'GET /projects/proj/branches',
+      'DELETE /projects/proj/branches/br-old',
+      'POST /projects/proj/branches',
+      'POST /projects/proj/branches/br-new/roles',
+      'POST /projects/proj/branches/br-new/databases',
+    ],
   )
+  assert.ok(calls[0].url.includes('limit=100'))
   assert.equal(calls[2].body.branch.name, 'ci-r-1-1')
   assert.equal(calls[2].body.endpoints[0].type, 'read_write')
   assert.equal(calls[2].auth, 'Bearer k')
-  assert.deepEqual(outputs, { branch: 'br-new', host: 'ep-x-pooler.c-1.aws.neon.tech' })
-  assert.ok(!JSON.stringify(outputs).includes('secret'), 'no password in any output')
+  assert.equal(calls[3].body.role.name, ROLE)
+  assert.deepEqual(calls[4].body.database, { name: DATABASE, owner_name: ROLE })
+  assert.deepEqual(outputs, { branch: 'br-new', host: 'ep-x-pooler.c-1.aws.neon.tech', password: 'branchpw' })
+  assert.ok(!JSON.stringify(outputs).includes('dummy'), "the project owner's password never leaves")
   assert.equal(got.id, 'br-new')
+})
+
+test('sweep is best effort: a failed delete or list is a warning, and creation goes on', async () => {
+  const old = new Date(Date.now() - MAX_AGE_MS - 60000).toISOString()
+  const logs = []
+  const { fetchImpl } = fakeFetch({ 'GET /projects/p/branches': { branches: [{ id: 'br-stuck', name: 'ci-r-1-1', created_at: old }] } })
+  await sweep(neon({ apiKey: 'k', projectId: 'p', fetchImpl }), (s) => logs.push(s))
+  assert.match(logs.join('\n'), /couldn't delete the leftover test branch br-stuck/)
+  const failing = neon({ apiKey: 'k', projectId: 'p', fetchImpl: async () => ({ ok: false, status: 503 }) })
+  await sweep(failing, (s) => logs.push(s))
+  assert.match(logs.at(-1), /couldn't list/)
 })
 
 test('create writes the branch id before failing on a missing host, so cleanup still runs', async () => {
@@ -71,7 +97,7 @@ test('create writes the branch id before failing on a missing host, so cleanup s
     'POST /projects/p/branches': { branch: { id: 'br-half' }, endpoints: [] },
   })
   const outputs = {}
-  await assert.rejects(create(neon({ apiKey: 'k', projectId: 'p', fetchImpl }), 'ci-r-1-1', (k, v) => (outputs[k] = v)), /without a compute host/)
+  await assert.rejects(create(neon({ apiKey: 'k', projectId: 'p', fetchImpl }), 'ci-r-1-1', (k, v) => (outputs[k] = v), () => {}), /without a compute host/)
   assert.equal(outputs.branch, 'br-half')
 })
 
