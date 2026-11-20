@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { manifestKey, PREVIEW_BUCKET, storedKey } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
 import { memoryStore } from './lib/memoryStore.mjs'
-import { checkLiveSite, deploymentPayload, findLive, publishLive, robotsProblems, verify } from './release.mjs'
+import { checkLiveSite, deploymentEnvironment, deploymentPayload, findLive, publishLive, robotsProblems, verify } from './release.mjs'
 
 const site = 'sbmcdn-com'
 const domain = 'sbmcdn.com'
@@ -160,4 +160,13 @@ test('the live distribution is found by its comment, and the domain from its ali
   await assert.rejects(findLive(store, 'bad-com'), /no alias matching/)
   store.distributions.push({ id: 'EDUP', comment: site, aliases: [] })
   await assert.rejects(findLive(store, site), /2 distributions/)
+})
+
+test("the deployment is recorded under live, or a site's own live-<site> when it shares its repo", () => {
+  assert.equal(deploymentEnvironment('example-com'), 'live')
+  assert.equal(deploymentEnvironment('example-com', ''), 'live')
+  assert.equal(deploymentEnvironment('admin-example-com', 'live-admin-example-com'), 'live-admin-example-com')
+  // Never another site's environment, and nothing else.
+  assert.throws(() => deploymentEnvironment('admin-example-com', 'live-example-com'), /live or live-admin-example-com/)
+  assert.throws(() => deploymentEnvironment('example-com', 'production'), /live or live-example-com/)
 })

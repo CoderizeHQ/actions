@@ -8,13 +8,21 @@ name: ci-site
 # committed files, before anything from the site runs; then install, Prettier, ESLint, tests, the build, and the SEO
 # check of what the build wrote. Prettier and ESLint run only where the repo configures them (the site template adds
 # both in Phase 4); tests only where package.json has a test script. The scripts come from this workflow's own commit.
+#
+# For a site in an app repo (platform README "Sites in an app repo"), platform's app-checks.yml passes the site's
+# package: the repo-wide checks run as they are, and Prettier, ESLint, the tests, the build and the SEO check run on
+# that package alone (the app's own tests run in ci-node, with their database).
 on:
   workflow_call:
     inputs:
       build-dir:
-        description: Where the build writes the site
+        description: Where the build writes the site (inside the package, when there is one)
         type: string
         default: dist
+      package:
+        description: The site's pnpm package as a path (./apps/web), for a site in an app repo; empty for the repo root
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -146,6 +154,8 @@ jobs:
 
       - name: Prettier
         working-directory: site
+        env:
+          PACKAGE: ${{ inputs.package }}
         run: |
           config=$(find . -maxdepth 1 \( -name .prettierrc -o -name '.prettierrc.*' -o -name 'prettier.config.*' \) -print -quit)
           if [ -z "$config" ] && ! jq -e 'has("prettier")' package.json >/dev/null; then
@@ -153,22 +163,36 @@ jobs:
             exit 0
           fi
           [ -x node_modules/.bin/prettier ] || { echo "::error::the repo configures Prettier but doesn't install it; add prettier to devDependencies"; exit 1; }
-          pnpm exec prettier --check .
+          pnpm exec prettier --check "${PACKAGE:-.}"
 
       - name: ESLint
         working-directory: site
+        env:
+          PACKAGE: ${{ inputs.package }}
         run: |
-          config=$(find . -maxdepth 1 -name 'eslint.config.*' -print -quit)
+          # The package's own config, or the repo's (ESLint looks up from each file).
+          config=$(find . ${PACKAGE:+"$PACKAGE"} -maxdepth 1 -name 'eslint.config.*' -print -quit)
           if [ -z "$config" ]; then
             echo "::notice::No eslint.config.js in this repo, so it isn't linted (the shared config comes in Phase 4)"
             exit 0
           fi
           [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
-          pnpm exec eslint .
+          pnpm exec eslint "${PACKAGE:-.}"
 
       - name: Tests
         working-directory: site
+        env:
+          PACKAGE: ${{ inputs.package }}
         run: |
+          if [ -n "$PACKAGE" ]; then
+            [ -f "$PACKAGE/package.json" ] || { echo "::error::$PACKAGE has no package.json"; exit 1; }
+            if ! jq -e '.scripts.test' "$PACKAGE/package.json" >/dev/null; then
+              echo "::notice::$PACKAGE has no test script, so there are no tests to run"
+              exit 0
+            fi
+            pnpm --filter "$PACKAGE" run test
+            exit 0
+          fi
           if ! jq -e '.scripts.test' package.json >/dev/null; then
             echo "::notice::package.json has no test script, so there are no tests to run"
             exit 0
@@ -176,11 +200,28 @@ jobs:
           pnpm test
 
       - name: Build
+        id: build
         working-directory: site
-        run: pnpm run build
+        env:
+          PACKAGE: ${{ inputs.package }}
+          BUILD_DIR: ${{ inputs.build-dir }}
+        run: |
+          # No package: the repo root builds the site (a site repo). A package (a site in an app repo, platform README
+          # "Sites in an app repo"): a path to exactly one pnpm package, built alone, as build-app-image builds an app;
+          # build-dir is then inside it.
+          if [ -z "$PACKAGE" ]; then
+            pnpm run build
+            echo "dir=$BUILD_DIR" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$PACKAGE" =~ ^\./[A-Za-z0-9_-][A-Za-z0-9_./-]*$ && "$PACKAGE" != *..* && "$PACKAGE" != */ ]] || { echo "::error::package is a path to one pnpm package in the repo (./apps/web)"; exit 1; }
+          matches=$(pnpm --filter "$PACKAGE" list --depth -1 --json | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).length))')
+          [ "$matches" = 1 ] || { echo "::error::package $PACKAGE matches $matches packages, not one"; exit 1; }
+          pnpm --filter "$PACKAGE" run build
+          echo "dir=${PACKAGE#./}/$BUILD_DIR" >> "$GITHUB_OUTPUT"
 
       # Canonicals, the sitemap, robots.txt, titles and trailing slashes, in what the build wrote.
       - name: SEO check
         env:
-          BUILD_DIR: site/${{ inputs.build-dir }}
+          BUILD_DIR: site/${{ steps.build.outputs.dir }}
         run: node actions/scripts/seoCheck.mjs
