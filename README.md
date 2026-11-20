@@ -52,7 +52,7 @@ required workflow that isn't there blocks every PR it covers.
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | none | `contents: read`, `actions: read` | None: no AWS, no secrets |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
@@ -96,6 +96,34 @@ In this order, so nothing from the site runs before the checks on its committed 
 The PR title, gitleaks, the audit (all as in ci-site), then install, ESLint (with a config) and tests (with a test
 script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of it, and their titles are
 Conventional Commits too (Release Please reads them).
+
+With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6), the job makes an empty database for
+itself just before the tests and drops it after them, whatever happened (`scripts/testDatabase.mjs`):
+
+- **Where:** on the runner VM, the `test-db` container (CoderizeHQ/runners): Postgres 18, as in production, on a RAM
+  disk, on the jobs network with no published port, reachable from job containers only. The autoscaler gives every job
+  `CODERIZEHQ_TEST_DB`. On a GitHub-hosted runner (the `RUNNER_LABEL` fallback, and this repo's own CI) the step
+  starts the image's own PostgreSQL 18 (`ubuntu-26.04`), listening on localhost only. Any other runner fails the step
+  with what's missing, so `ci / ci-node` can't pass without the database.
+- **Who:** the role `ci`: `LOGIN CREATEDB`, not a superuser, and no password. pg_hba trusts `ci` from the jobs network
+  (or 127.0.0.1) and refuses every other role over the network. There is no secret to pass or to leak; nothing about
+  the database needs masking in the log.
+- **Separation, not isolation:** each job's database is `ci_<unix seconds>_<12 random hex>`, so concurrent jobs never
+  share one by accident. They share the server and the role, so a job's own code could, on purpose, open, change or
+  drop another running job's database, or fill the VM server's 1 GB RAM disk. What it can reach is other runs' test
+  fixtures and CI's availability, nothing else: no client data, no credential, nothing outside the VM. Running code
+  there at all takes push access to a private CoderizeHQ repo.
+- **Cleanup:** the drop step runs `if: always()` (`DROP DATABASE ... WITH (FORCE)`). Before making its own, every job
+  drops, best effort, every database `ci` owns that is over three hours old by its name, dated ahead, or not named
+  like ours (only jobs make databases there). The database is made inside this job, whose timeout is 60 minutes, so
+  runner queue time never counts. The VM's server keeps its data on a RAM disk, so a restart empties it.
+- **The tests** get one URL as both `DATABASE_URL` and `DIRECT_URL` (there is no pooler). The repo's test setup
+  must migrate the empty database; ci-node doesn't. **Nothing but test fixtures ever goes in it:** never a dump, a
+  restore or a copy of a real database.
+
+This repo's own `ci.yml` turns `test-database` on. This repo is public and `RUNNER_LABEL` reaches only private repos,
+so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
+`scripts/testDatabase.test.mjs` checks the database it was given is empty, writable, Postgres 18, and not a superuser's.
 
 ### deploy-preview
 

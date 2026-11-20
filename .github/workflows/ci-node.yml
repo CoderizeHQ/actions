@@ -10,6 +10,17 @@ name: ci-node
 # config) and tests (where package.json has a test script). The scripts come from this workflow's own commit.
 on:
   workflow_call:
+    inputs:
+      # An API whose tests need Postgres (STANDARDS.md 6): an empty database for this job alone, made just before the
+      # tests and dropped after them whatever happened (scripts/testDatabase.mjs). It lives on a CI-only Postgres 18 that
+      # holds nothing but test fixtures: the runner VM's `test-db` (CODERIZEHQ_TEST_DB, reachable from job containers
+      # only), or on a GitHub-hosted runner the image's own PostgreSQL 18, started for the job on localhost. The role
+      # `ci` has no password and no superuser; there is no secret to pass. The tests get DATABASE_URL and DIRECT_URL
+      # (the same URL: there is no pooler); the repo's test setup must migrate the empty database.
+      #   with: { test-database: true }
+      test-database:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,6 +32,8 @@ env:
 
 jobs:
   ci-node:
+    # MAX_AGE_S in scripts/testDatabase.mjs (three hours) relies on this timeout.
+    timeout-minutes: 60
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
@@ -103,11 +116,46 @@ jobs:
           [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
           pnpm exec eslint .
 
+      # On the runner VM the autoscaler sets CODERIZEHQ_TEST_DB on every job container. On a GitHub-hosted runner (the
+      # RUNNER_LABEL fallback, and actions' own CI) the image's PostgreSQL 18 is started here: pg_hba trusts only the
+      # role `ci` from 127.0.0.1, and the server listens on localhost only. Anything else fails with what's missing.
+      - name: Test database
+        id: testdb
+        if: inputs.test-database
+        env:
+          SCRIPTS: ${{ steps.self.outputs.scripts }}
+        run: |
+          if [ -z "${CODERIZEHQ_TEST_DB:-}" ] && [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            hba=$(compgen -G '/etc/postgresql/*/main/pg_hba.conf' | head -n 1 || true)
+            [ -n "$hba" ] || { echo "::error::test-database: this GitHub-hosted image has no PostgreSQL"; exit 1; }
+            sudo sed -i '1i host all ci 127.0.0.1/32 trust' "$hba"
+            sudo systemctl start postgresql.service
+            for _ in $(seq 1 30); do pg_isready -q -h 127.0.0.1 && break; sleep 1; done
+            (cd / && sudo -u postgres psql -X -q -v ON_ERROR_STOP=1 -c 'CREATE ROLE ci LOGIN CREATEDB')
+            export TEST_DB_ADMIN_URL=postgresql://ci@127.0.0.1:5432/postgres
+          fi
+          node "$SCRIPTS/scripts/testDatabase.mjs" create
+
       - name: Tests
         working-directory: repo
+        env:
+          TEST_DATABASE: ${{ inputs.test-database }}
+          TEST_DB_URL: ${{ steps.testdb.outputs.url }}
         run: |
           if ! jq -e '.scripts.test' package.json >/dev/null; then
             echo "::notice::package.json has no test script, so there are no tests to run"
             exit 0
           fi
+          if [ "$TEST_DATABASE" = true ]; then
+            [ -n "$TEST_DB_URL" ] || { echo "::error::test-database is on, but no test database was made"; exit 1; }
+            export DATABASE_URL="$TEST_DB_URL" DIRECT_URL="$TEST_DB_URL"
+          fi
           pnpm test
+
+      - name: Drop the test database
+        if: always() && steps.testdb.outputs.name != ''
+        env:
+          SCRIPTS: ${{ steps.self.outputs.scripts }}
+          NAME: ${{ steps.testdb.outputs.name }}
+          TEST_DB_ADMIN_URL: ${{ steps.testdb.outputs.admin }}
+        run: node "$SCRIPTS/scripts/testDatabase.mjs" drop "$NAME"
