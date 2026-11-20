@@ -8,7 +8,10 @@
 //
 // `node release.mjs publish` (the release environment, as coderizehq-live-publish-<site>) then:
 // 0. finds the site's live distribution by its Comment, which platform sets to exactly the site name, and the
-//    domain from its aliases (the bucket is coderizehq-live-<site> by contract), so the site passes neither;
+//    domain from its aliases (the bucket is coderizehq-live-<site> by contract), so the site passes neither. A
+//    distribution with no aliases at all is a site moving in by an alias move (platform's `alias_move`): another
+//    distribution still serves its domain, so this release publishes to the new one and checks it on its own
+//    *.cloudfront.net name, before the names move over;
 // 1. reads the stored build's manifest for that exact commit, waiting for deploy-preview to finish storing it;
 // 2. downloads every stored file and checks it against the manifest's size and SHA-256;
 // 3. copies it into coderizehq-live-<site> server-side from _builds/<site>/<commit>/ (the only writes the live role
@@ -128,15 +131,27 @@ export async function publishLive({ store, site, repo, commit, distributionId, s
 
 /**
  * The site's live distribution and domain: the one distribution whose Comment is the site name, and its alias that is
- * the site's domain (the apex; the other is www).
- * @returns {Promise<{ distributionId: string, domain: string }>}
+ * the site's domain (the apex; the other is www). `host` is the name the live checks ask: the domain, or, for a
+ * distribution with no aliases yet (a site moving in by an alias move, platform's `alias_move`), its own
+ * *.cloudfront.net name, with `domain` null: the domain still reaches the distribution the site is moving from.
+ * @returns {Promise<{ distributionId: string, domain: string | null, host: string }>}
  */
 export async function findLive(store, site) {
   const d = await store.findDistribution(site)
   if (!d) throw new Error(`no CloudFront distribution has the comment ${site}; is the site's live hosting applied?`)
   const domain = d.aliases.find((a) => !a.startsWith('www.') && a.replaceAll('.', '-') === site)
-  if (!domain) throw new Error(`distribution ${d.id} has no alias matching ${site} (${d.aliases.join(', ')})`)
-  return { distributionId: d.id, domain }
+  if (domain) return { distributionId: d.id, domain, host: domain }
+  if (!d.aliases.length && d.domainName) return { distributionId: d.id, domain: null, host: d.domainName }
+  throw new Error(`distribution ${d.id} has no alias matching ${site} (${d.aliases.join(', ')})`)
+}
+
+/**
+ * Whether a sitemap's host is the site's: its domain or www, or, with the domain unknown (before an alias move), the
+ * name or its www whose dots as hyphens are the site name.
+ */
+export function isSiteHost(host, { domain, site }) {
+  if (domain) return host === domain || host === `www.${domain}`
+  return host.replace(/^www\./, '').replaceAll('.', '-') === site
 }
 
 /** Problems with a robots.txt that would hide the site (the preview-robots-ships-to-live lesson). */
@@ -169,12 +184,13 @@ const sitemapsIn = (text) => [...text.matchAll(/^\s*sitemap\s*:\s*(\S+)/gim)].ma
 
 /**
  * Step 5's checks against the live site: the home page and robots.txt are this build's bytes (waiting out the cache
- * clear), and every sitemap robots.txt names answers on this site.
+ * clear), and every sitemap robots.txt names answers on this site. `host` is where the requests go: the domain, or the
+ * distribution's own *.cloudfront.net name before an alias move (`domain` null, see findLive), where a sitemap on the
+ * site's domain is fetched by its path.
  * @returns {Promise<string[]>} problems
  */
-export async function checkLiveSite({ domain, files, fetchImpl = fetch, waitMs = 10 * 60_000, pollMs = 15_000, log = console.log }) {
+export async function checkLiveSite({ domain, site, host = domain, files, fetchImpl = fetch, waitMs = 10 * 60_000, pollMs = 15_000, log = console.log }) {
   const byPath = new Map(files.map((f) => [f.path, f]))
-  const hosts = new Set([domain, `www.${domain}`])
   const get = async (url) => {
     const res = await fetchImpl(url, { redirect: 'follow', headers: { 'cache-control': 'no-cache' } })
     return { status: res.status, url: res.url || url, body: Buffer.from(await res.arrayBuffer()) }
@@ -186,8 +202,8 @@ export async function checkLiveSite({ domain, files, fetchImpl = fetch, waitMs =
   let home
   let robots
   for (;;) {
-    home = await get(`https://${domain}/`)
-    robots = await get(`https://${domain}/robots.txt`)
+    home = await get(`https://${host}/`)
+    robots = await get(`https://${host}/robots.txt`)
     if (matches(home, 'index.html') && matches(robots, 'robots.txt')) break
     if (Date.now() >= until) break
     log('waiting for the live cache to serve the new build…')
@@ -201,18 +217,18 @@ export async function checkLiveSite({ domain, files, fetchImpl = fetch, waitMs =
   const text = robots.body.toString('utf8')
   problems.push(...robotsProblems(text))
   for (const url of sitemapsIn(text)) {
-    let host
+    let parsed
     try {
-      host = new URL(url).hostname
+      parsed = new URL(url)
     } catch {
       problems.push(`robots.txt names a sitemap that isn't a URL: ${url}`)
       continue
     }
-    if (!hosts.has(host)) {
+    if (!isSiteHost(parsed.hostname, { domain, site })) {
       problems.push(`robots.txt names a sitemap on another host: ${url}`)
       continue
     }
-    const r = await get(url)
+    const r = await get(domain ? url : `https://${host}${parsed.pathname}${parsed.search}`)
     const body = r.body.toString('utf8')
     if (r.status !== 200 || !/<(urlset|sitemapindex)[\s>]/.test(body)) problems.push(`sitemap ${url} answered ${r.status} without a sitemap in it`)
   }
@@ -285,8 +301,9 @@ async function publishMain() {
 
   const { awsStore } = await import('./lib/aws.mjs')
   const store = awsStore()
-  const { distributionId, domain } = await findLive(store, site)
-  output('site-url', `https://${domain}`)
+  const { distributionId, domain, host } = await findLive(store, site)
+  if (!domain) console.log(`::notice::${site}: the distribution has no aliases yet (an alias move); publishing to it and checking it at https://${host}`)
+  output('site-url', `https://${host}`)
 
   const base = {
     kind: env.KIND,
@@ -295,7 +312,7 @@ async function publishMain() {
     approver: env.APPROVER || null,
     prs: env.DEPENDENCY_PRS ? env.DEPENDENCY_PRS.split(',').map(Number) : [],
     workflowSha,
-    domain,
+    domain: host,
     runUrl: env.RUN_URL,
   }
   // The manifest first, so the deployment record names it from the start.
@@ -311,22 +328,22 @@ async function publishMain() {
       auto_merge: false,
       required_contexts: [],
       production_environment: true,
-      description: `${commit.slice(0, 7)} to ${domain}: ${what}`.slice(0, 140),
+      description: `${commit.slice(0, 7)} to ${host}: ${what}`.slice(0, 140),
       payload: deploymentPayload(base),
     },
   })
   const status = (state, description) =>
     gh(token, `/repos/${repo}/deployments/${deployment.id}/statuses`, {
       method: 'POST',
-      body: { state, environment_url: `https://${domain}`, log_url: env.RUN_URL, description: description.slice(0, 140) },
+      body: { state, environment_url: `https://${host}`, log_url: env.RUN_URL, description: description.slice(0, 140) },
     })
   await status('in_progress', 'publishing')
 
   try {
     const result = await publishLive({ store, site, repo, commit, distributionId, stored, maxShare })
-    const siteProblems = await checkLiveSite({ domain, files: result.files })
+    const siteProblems = await checkLiveSite({ domain, site, host, files: result.files })
     summary(
-      `### Live\n\nhttps://${domain}: ${result.copies} copied, ${result.deletes} deleted, ${result.unchanged} unchanged, cache cleared (${result.invalidation}).\n\n` +
+      `### Live\n\nhttps://${host}: ${result.copies} copied, ${result.deletes} deleted, ${result.unchanged} unchanged, cache cleared (${result.invalidation}).\n\n` +
         `Commit \`${commit}\`, ${what}, manifest SHA-256 \`${result.manifestSha256}\`.`,
     )
     if (siteProblems.length) {
@@ -334,7 +351,7 @@ async function publishMain() {
       throw new Error(`published, but the live site checks failed:\n${siteProblems.join('\n')}`)
     }
     await status('success', `live; manifest ${result.manifestSha256}`)
-    console.log(`released ${commit} to https://${domain} (${what}; manifest ${result.manifestSha256})`)
+    console.log(`released ${commit} to https://${host} (${what}; manifest ${result.manifestSha256})`)
   } catch (err) {
     if (!/^published, but/.test(err.message)) await status('failure', err.message.split('\n')[0])
     throw err

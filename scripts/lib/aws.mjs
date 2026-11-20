@@ -134,7 +134,7 @@ export function awsStore() {
       do {
         const res = await cloudfront.send(new ListDistributionsCommand({ Marker: marker }))
         for (const d of res.DistributionList?.Items ?? []) {
-          if (d.Comment === comment) found.push({ id: d.Id, aliases: d.Aliases?.Items ?? [] })
+          if (d.Comment === comment) found.push({ id: d.Id, domainName: d.DomainName, aliases: d.Aliases?.Items ?? [] })
         }
         marker = res.DistributionList?.IsTruncated ? res.DistributionList.NextMarker : undefined
       } while (marker)

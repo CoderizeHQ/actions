@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { manifestKey, PREVIEW_BUCKET, storedKey } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
 import { memoryStore } from './lib/memoryStore.mjs'
-import { checkLiveSite, deploymentEnvironment, deploymentPayload, findLive, publishLive, robotsProblems, verify } from './release.mjs'
+import { checkLiveSite, deploymentEnvironment, deploymentPayload, findLive, isSiteHost, publishLive, robotsProblems, verify } from './release.mjs'
 
 const site = 'sbmcdn-com'
 const domain = 'sbmcdn.com'
@@ -154,12 +154,53 @@ test('the live distribution is found by its comment, and the domain from its ali
     { id: 'EOTHER1', comment: 'other-com', aliases: ['other.com', 'www.other.com'] },
     { id: 'E1ABCDEF2GHIJ', comment: site, aliases: ['www.sbmcdn.com', 'sbmcdn.com'] },
   )
-  assert.deepEqual(await findLive(store, site), { distributionId: 'E1ABCDEF2GHIJ', domain: 'sbmcdn.com' })
+  assert.deepEqual(await findLive(store, site), { distributionId: 'E1ABCDEF2GHIJ', domain: 'sbmcdn.com', host: 'sbmcdn.com' })
   await assert.rejects(findLive(store, 'missing-com'), /no CloudFront distribution/)
   store.distributions.push({ id: 'EBAD', comment: 'bad-com', aliases: ['elsewhere.com'] })
   await assert.rejects(findLive(store, 'bad-com'), /no alias matching/)
   store.distributions.push({ id: 'EDUP', comment: site, aliases: [] })
   await assert.rejects(findLive(store, site), /2 distributions/)
+})
+
+// platform's alias_move: the distribution is made without aliases while the old fleet still serves the domain, and the
+// release publishes to it before the names move over (CloudFront update-domain-association).
+test('a distribution with no aliases yet (an alias move) is released to and checked on its own cloudfront.net name', async () => {
+  const store = memoryStore()
+  store.distributions.push({ id: 'EMOVE', comment: site, domainName: 'd111111abcdef8.cloudfront.net', aliases: [] })
+  assert.deepEqual(await findLive(store, site), { distributionId: 'EMOVE', domain: null, host: 'd111111abcdef8.cloudfront.net' })
+  // Some aliases, none of them the site's: still refused.
+  store.distributions.push({ id: 'EOTHER', comment: 'other-com', domainName: 'd2.cloudfront.net', aliases: ['www.other.com'] })
+  await assert.rejects(findLive(store, 'other-com'), /no alias matching/)
+})
+
+test('before an alias move, the live checks ask the distribution and fetch the sitemap by its path there', async () => {
+  const asked = []
+  const pages = { '/': files['index.html'], '/robots.txt': robots, '/sitemap-index.xml': files['sitemap-index.xml'] }
+  const fetchImpl = async (url) => {
+    asked.push(url)
+    const u = new URL(url)
+    // The domain itself still reaches the old site.
+    const body = u.hostname === 'd111111abcdef8.cloudfront.net' ? pages[u.pathname] : 'old site'
+    return { status: body === undefined ? 404 : 200, url, arrayBuffer: async () => Buffer.from(body ?? 'not found') }
+  }
+  const host = 'd111111abcdef8.cloudfront.net'
+  assert.deepEqual(await checkLiveSite({ domain: null, site, host, files: built, fetchImpl, waitMs: 0, ...quiet }), [])
+  assert.deepEqual(asked, [`https://${host}/`, `https://${host}/robots.txt`, `https://${host}/sitemap-index.xml`])
+  // A sitemap on a host that isn't the site's is still refused.
+  const elsewhere = 'User-agent: *\nAllow: /\nSitemap: https://other.com/sitemap-index.xml\n'
+  const withElsewhere = built.map((f) => (f.path === 'robots.txt' ? { ...f, size: elsewhere.length, sha256: hashes(Buffer.from(elsewhere)).sha256 } : f))
+  const other = async (url) => ({ status: 200, url, arrayBuffer: async () => Buffer.from(new URL(url).pathname === '/robots.txt' ? elsewhere : files['index.html']) })
+  assert.match((await checkLiveSite({ domain: null, site, host, files: withElsewhere, fetchImpl: other, waitMs: 0, ...quiet })).join(' '), /another host/)
+})
+
+test("a sitemap's host is the site's domain or www; before an alias move, the name whose dots as hyphens are the site", () => {
+  assert.equal(isSiteHost('sbmcdn.com', { domain, site }), true)
+  assert.equal(isSiteHost('www.sbmcdn.com', { domain, site }), true)
+  assert.equal(isSiteHost('cdn.sbmcdn.com', { domain, site }), false)
+  assert.equal(isSiteHost('sbmcdn.com', { domain: null, site }), true)
+  assert.equal(isSiteHost('www.sbmcdn.com', { domain: null, site }), true)
+  assert.equal(isSiteHost('sbmcdn-com.preview.coderize.dev', { domain: null, site }), false)
+  assert.equal(isSiteHost('wwwxsbmcdn.com', { domain: null, site }), false)
 })
 
 test("the deployment is recorded under live, or a site's own live-<site> when it shares its repo", () => {

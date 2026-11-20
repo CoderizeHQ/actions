@@ -71,7 +71,7 @@ export function memoryStore() {
       calls.push(['findDistribution', comment])
       const found = this.distributions.filter((d) => d.comment === comment)
       if (found.length > 1) throw new Error(`${found.length} distributions have the comment ${comment}`)
-      return found[0] ? { id: found[0].id, aliases: found[0].aliases } : null
+      return found[0] ? { id: found[0].id, domainName: found[0].domainName, aliases: found[0].aliases } : null
     },
     async waitInvalidation(distributionId, id) {
       calls.push(['waitInvalidation', distributionId, id])

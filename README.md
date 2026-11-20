@@ -162,7 +162,10 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
    - anything else is refused.
 2. `publish` (the `release` environment, the live role; one queue per site):
    - finds the live distribution: the one whose Comment is exactly `<site>` (platform sets it), and the domain from
-     its apex alias. The bucket is `coderizehq-live-<site>`. The site passes neither;
+     its apex alias. The bucket is `coderizehq-live-<site>`. The site passes neither. A distribution with no aliases
+     yet is a site moving in by an alias move (platform's `alias_move`, its docs/go-live.md "Zero-downtime cutover"):
+     the old fleet still serves the domain, so the release publishes to the new distribution and runs the live checks
+     below against its own `*.cloudfront.net` name, fetching the sitemap by its path there;
    - reads the manifest for the exact commit (waiting up to 20 minutes for deploy-preview to store it) and records a
      GitHub deployment to `live` whose payload names the commit, the release PR, the approver (or the Renovate PRs),
      the manifest's SHA-256 and the workflow commit;
