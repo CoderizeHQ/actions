@@ -13,7 +13,9 @@ name: release
 #
 # `verify` decides through GitHub's API, with no AWS access: a version tag must be the release App's merged
 # release-please-- PR, release files only, approved by James at its final commit; a run on main must be a gap of
-# Renovate's passing lockfile-only minor and patch PRs since the last version release; anything else is refused.
+# Renovate's passing lockfile-only minor and patch PRs since the last version release, or a go-live release (the
+# repository_dispatch `go-live-release` from the platform App, naming this site), which `publish` then refuses unless
+# the site's distribution serves no name yet (before its alias move); anything else is refused.
 # `publish` then runs in the release environment as coderizehq-live-publish-<site> (its ARN comes from `site`), which
 # trusts only this file at v1 or v1.*: it publishes the build deploy-preview stored for that exact commit, checks it
 # on live, and records a GitHub deployment. IAM only lets it copy builds CI stored from main; that the build is the
@@ -90,6 +92,8 @@ jobs:
           install: false
           working-directory: actions
 
+      # The event's fields decide a go-live release (platform's apply, as the platform App, for a site whose new
+      # distribution has no aliases yet); they come in as environment only.
       - name: Verify the release
         id: verify
         env:
@@ -97,6 +101,11 @@ jobs:
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
+          SITE: ${{ inputs.site }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH: ${{ github.event.action }}
+          SENDER: ${{ github.event.sender.login }}
+          PAYLOAD_SITE: ${{ github.event.client_payload.site }}
         run: node actions/scripts/release.mjs verify
 
   publish:
