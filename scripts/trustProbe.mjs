@@ -11,6 +11,14 @@
 // Each must answer AccessDenied; an assumed role fails the job at once. So the refusals mean something, the same
 // token must assume coderizehq-infra-plan in each account through the same call (the control), and each refused
 // role must exist (iam:GetRole, as the plan role): STS answers AccessDenied for a role that isn't there.
+//
+// A site role that doesn't exist yet is a warning, not a failure: a record merged before its apply (a new site, or a
+// go-live) names a role only the next apply makes, and failing on it blocked every platform PR until that apply ran,
+// even the PR the apply was waiting for (platform, 2026-11-20). A missing role can't be assumed by anyone, so it opens
+// nothing; it just proves nothing either, until it exists and a later PR probes it (platform's trust.test.mjs checks its
+// policy before then). What would make the whole check hollow still fails: coderizehq-infra-deploy missing in either
+// account, or every role of one kind (preview deploy, live publish) missing in its account, which is what a wrong name
+// in this file would look like.
 
 import { execFile } from 'node:child_process'
 import { readdir, readFile } from 'node:fs/promises'
@@ -115,13 +123,20 @@ export async function roleExistsCli(account, role) {
   }
 }
 
+/** A role's kind, for the "every role of one kind is missing" check: the role name without its site. */
+export const kindOf = (role) => role.replace(/^(coderizehq-(?:preview-deploy|live-publish))-.+$/, '$1')
+
 /**
  * Runs every attempt and judges it.
  * @param {{ claims: Record<string, string>, token: string, sites: any[], assume?: typeof tryAssume, roleExists?: typeof roleExistsCli }} input
+ * @returns {Promise<{ rows: object[], problems: string[], warnings: string[] }>}
  */
 export async function probe({ claims, token, sites, assume = tryAssume, roleExists = roleExistsCli }) {
   const problems = []
+  const warnings = []
   const rows = []
+  // account/kind => { refused, missing: role[] }
+  const kinds = new Map()
   for (const account of [PREVIEW_ACCOUNT, LIVE_ACCOUNT]) {
     const control = await assume(arn(account, 'coderizehq-infra-plan'), token)
     rows.push({ role: 'coderizehq-infra-plan (control)', account, why: 'trusted: a platform PR running ci-tofu.yml at v1', result: control.assumed ? 'assumed' : control.code })
@@ -130,13 +145,27 @@ export async function probe({ claims, token, sites, assume = tryAssume, roleExis
   for (const t of targets(sites)) {
     const why = differences(claims, t.trusted)
     const result = await assume(t.arn, token)
-    rows.push({ role: t.role, account: t.account, why: why.join('; ') || 'nothing (this token matches its trust)', result: result.assumed ? 'ASSUMED' : result.code })
+    const row = { role: t.role, account: t.account, why: why.join('; ') || 'nothing (this token matches its trust)', result: result.assumed ? 'ASSUMED' : result.code }
+    rows.push(row)
+    const key = `${t.account}/${kindOf(t.role)}`
+    if (!kinds.has(key)) kinds.set(key, { account: t.account, kind: kindOf(t.role), refused: 0, missing: [] })
+    const kind = kinds.get(key)
     if (result.assumed) problems.push(`${t.role} in ${t.account} was assumed by this token: its trust lets ${claims.repository} ${claims.job_workflow_ref} in`)
     else if (result.code !== 'AccessDenied') problems.push(`${t.role} in ${t.account} answered ${result.code} (${result.message}), not AccessDenied, so it proves nothing about the policy`)
-    else if (!(await roleExists(t.account, t.role))) problems.push(`${t.role} doesn't exist in ${t.account}, so its refusal proves nothing`)
+    else if (!(await roleExists(t.account, t.role))) {
+      row.result = 'not made yet'
+      kind.missing.push(t.role)
+      if (t.role === 'coderizehq-infra-deploy') problems.push(`${t.role} doesn't exist in ${t.account}, so its refusal proves nothing`)
+      else warnings.push(`${t.role} doesn't exist in ${t.account} yet (the next apply makes it), so nothing was proved about it; the first PR after that apply probes it`)
+    } else kind.refused++
     if (!why.length) problems.push(`this run's token matches ${t.role}'s trust; run the trust tests from platform pull requests only`)
   }
-  return { rows, problems }
+  for (const k of kinds.values()) {
+    if (k.kind !== 'coderizehq-infra-deploy' && k.missing.length && !k.refused) {
+      problems.push(`none of the ${k.missing.length} ${k.kind}-* roles exists in ${k.account}, so no refusal of that kind proved anything: is the role name right?`)
+    }
+  }
+  return { rows, problems, warnings }
 }
 
 export function table(rows) {
@@ -158,14 +187,16 @@ async function main() {
   const shown = ['repository', 'repository_id', 'event_name', 'ref', 'environment', 'job_workflow_ref', 'sub']
   console.log(`This job's token: ${shown.map((k) => `${k}=${claims[k] ?? '(none)'}`).join(', ')}`)
 
-  const { rows, problems } = await probe({ claims, token, sites })
+  const { rows, problems, warnings } = await probe({ claims, token, sites })
   console.log(table(rows))
-  summary(`### Negative trust tests\n\n${table(rows)}`)
+  summary(`### Negative trust tests\n\n${table(rows)}${warnings.length ? `\n\n${warnings.map((w) => `- ${w}`).join('\n')}` : ''}`)
+  for (const w of warnings) console.log(`::warning::${w}`)
   if (problems.length) {
     for (const p of problems) console.log(`::error::${p}`)
     process.exit(1)
   }
-  console.log(`${rows.length - 2} roles refused this token, and the control role accepted it in both accounts.`)
+  const refused = rows.filter((r) => r.result === 'AccessDenied').length
+  console.log(`${refused} roles refused this token${warnings.length ? ` (${warnings.length} not made yet)` : ''}, and the control role accepted it in both accounts.`)
 }
 
 runIfMain(import.meta.url, main)
