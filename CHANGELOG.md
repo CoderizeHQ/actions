@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/CoderizeHQ/actions/compare/v1.4.2...v1.5.0) (2026-11-20)
+
+
+### Features
+
+* build a site from one package of a workspace, and record its own deployments ([#40](https://github.com/CoderizeHQ/actions/issues/40)) ([c230c93](https://github.com/CoderizeHQ/actions/commit/c230c93c37ac7f21bb11412bc6e6bc05bc02587f))
+
 ## [1.4.2](https://github.com/CoderizeHQ/actions/compare/v1.4.1...v1.4.2) (2026-11-20)
 
 
