@@ -66,10 +66,12 @@ export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platfo
  */
 export async function verify({ token, repo, ref, sha, event, dispatch, sender, site, payloadSite, checks = { checkRelease, checkDependencyRun } }) {
   if (event === 'repository_dispatch' && dispatch === GO_LIVE.action) {
+    // The sender and the payload come from whoever sent the dispatch: only shown, never trusted, and shown tamed.
+    const shown = (v, none) => (v ? String(v).replace(/[^\w./[\]-]/g, '?').slice(0, 60) : none)
     const reasons = []
-    if (ref !== 'refs/heads/main') reasons.push(`a go-live release runs only on main, not ${ref}`)
-    if (!GO_LIVE.senders.includes(sender)) reasons.push(`a go-live release comes only from platform's apply (${GO_LIVE.senders.join(', ')}), not ${sender || 'an unknown sender'}`)
-    if (!site || payloadSite !== site) reasons.push(`this go-live release names ${payloadSite || 'no site'}, not ${site}`)
+    if (ref !== 'refs/heads/main') reasons.push(`a go-live release runs only on main, not ${shown(ref)}`)
+    if (!GO_LIVE.senders.includes(sender)) reasons.push(`a go-live release comes only from platform's apply (${GO_LIVE.senders.join(', ')}), not ${shown(sender, 'an unknown sender')}`)
+    if (!site || payloadSite !== site) reasons.push(`this go-live release names ${shown(payloadSite, 'no site')}, not ${site}`)
     if (reasons.length) return { publish: false, reasons }
     return { publish: true, kind: 'go-live', pr: null, approver: null, reasons: [] }
   }

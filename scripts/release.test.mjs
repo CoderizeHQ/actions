@@ -263,3 +263,15 @@ test('describe names every kind and refuses an unknown one', () => {
   assert.equal(describe({ kind: 'version', pr: 9, approver: 'GilbertJames' }), 'release PR #9, approved by GilbertJames')
   assert.throws(() => describe({ kind: 'manual' }), /unknown release kind manual/)
 })
+
+test("verify: a go-live dispatch's sender and site are shown tamed, so they can't add lines or workflow commands", async () => {
+  const never = { checkRelease: async () => assert.fail('no release check'), checkDependencyRun: async () => assert.fail('no dependency check') }
+  const r = await verify({ ...goLive, sender: 'x\n::error::fake', payloadSite: `a-com\n## injected${'z'.repeat(100)}`, checks: never })
+  assert.equal(r.publish, false)
+  for (const reason of r.reasons) {
+    assert.doesNotMatch(reason, /\n/)
+    assert.doesNotMatch(reason, /::error::|##/)
+  }
+  assert.match(r.reasons[1], /names a-com\?\?\?\?injectedz+, not sbmcdn-com$/)
+  assert.ok(r.reasons[1].length < 120)
+})
