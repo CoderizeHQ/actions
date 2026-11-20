@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/CoderizeHQ/actions/compare/v1.2.0...v1.3.0) (2026-11-20)
+
+
+### Features
+
+* add build-app-image and deploy-app for apps on the app server ([#32](https://github.com/CoderizeHQ/actions/issues/32)) ([0c24677](https://github.com/CoderizeHQ/actions/commit/0c24677a94197566d2bdb33055ad954a2a69b7d1))
+
 ## [1.2.0](https://github.com/CoderizeHQ/actions/compare/v1.1.1...v1.2.0) (2026-11-17)
 
 
