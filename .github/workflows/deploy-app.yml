@@ -4,8 +4,8 @@ name: deploy-app
 # docs/apps.md, "Releases"):
 #   uses: CoderizeHQ/actions/.github/workflows/deploy-app.yml@v1
 #   with: { app: maverick-admin }
-# It deploys the image build-app-image pushed for this commit to the app server, by running the app's own deploy
-# document there, fails unless the document succeeds, and then tags the image release-<sha> in ECR so it's kept apart
+# It deploys the image build-app-image pushed for this commit to the app server (waiting up to 15 minutes for a build
+# still running), by running the app's own deploy document there, fails unless the document succeeds, and then tags the image release-<sha> in ECR so it's kept apart
 # from newer builds. Nothing is built here.
 #
 # It runs in the app repo's `release` environment as coderizehq-app-deploy-<app>, which trusts only this file at v1 or
@@ -75,8 +75,12 @@ jobs:
           role-to-assume: arn:aws:iam::243891826043:role/coderizehq-app-deploy-${{ inputs.app }}
           aws-region: us-east-1
 
+      # Waits up to 15 minutes for build-app-image's image of this commit (a release tag and its build on main start
+      # together), then up to 31 for the deploy document. The token only reads the app repo's runs (actions: read).
       - name: Deploy on the app server
         env:
           APP: ${{ inputs.app }}
           COMMIT: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: node actions/scripts/deployApp.mjs
