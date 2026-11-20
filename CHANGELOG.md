@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/CoderizeHQ/actions/compare/v1.4.1...v1.4.2) (2026-11-20)
+
+
+### Bug Fixes
+
+* wait for the app image in deploy-app instead of failing while it builds ([#38](https://github.com/CoderizeHQ/actions/issues/38)) ([5cb4513](https://github.com/CoderizeHQ/actions/commit/5cb45132dc7f7c3efcd283fb02e9a817ba556ef7))
+
 ## [1.4.1](https://github.com/CoderizeHQ/actions/compare/v1.4.0...v1.4.1) (2026-11-20)
 
 
