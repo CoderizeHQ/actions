@@ -242,8 +242,16 @@ Every attempt differs from its role's trust in more than one way, so this proves
 platform PR; platform's `aws/trust/trust.test.mjs` proves each condition on its own against the templates (another
 repository, a fork, another workflow file, a branch instead of a tag, a `v10` tag, the live role without the release
 environment). An assumed role fails the job (its credentials are never read), and so does any other answer than
-AccessDenied, a refused role that doesn't exist (checked with `iam:GetRole` as the plan role), or a control that
-fails: the same token must assume `coderizehq-infra-plan` in each account through the same unsigned call. `plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
+AccessDenied, or a control that fails: the same token must assume `coderizehq-infra-plan` in each account through the
+same unsigned call. Each refused role is checked to exist (`iam:GetRole` as the plan role), since STS refuses a role
+that isn't there too. A site role that isn't made yet (a record merged before the apply that makes its roles) is a
+warning, shown as "not made yet": nobody can assume a role that doesn't exist, and failing on it blocked every platform
+PR until that apply ran. A missing `coderizehq-infra-deploy`, or every role of one kind missing in its account (what a
+wrong role name here would look like), still fails; so the first role of a kind in an account, from a record not yet
+applied, still blocks until its apply, which is the price of that guard. Only IAM's NoSuchEntity counts as missing:
+any other `GetRole` error fails the job.
+
+`plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
 `state`) and the root's own account's for its resources (profile `account`), `tofu plan -lock=false`. A root whose
 provider needs a token the caller didn't pass (Cloudflare, GitHub) is skipped and says so. `comment`: one PR comment
 with every plan, updated on each push.

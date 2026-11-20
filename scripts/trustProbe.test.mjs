@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { differences, parseSts, probe, targets, tryAssume } from './trustProbe.mjs'
+import { differences, kindOf, parseSts, probe, targets, tryAssume } from './trustProbe.mjs'
 
 const SITES = [
   { site: 'sbmcdn-com', repo: 'gate-test-web', repo_id: 1458015532, account: 'live' },
@@ -126,8 +126,8 @@ test('fails on an assumed role, another error, a missing role, or a failed contr
   })
   assert.match(otherError.problems.join('\n'), /answered InvalidIdentityToken/)
 
-  const missing = await probe({ claims: PR_CLAIMS, token: 'jwt', sites: SITES, assume: fakeAssume(), roleExists: async (account, role) => role !== 'coderizehq-preview-deploy-sbmcdn-com' })
-  assert.deepEqual(missing.problems, ["coderizehq-preview-deploy-sbmcdn-com doesn't exist in 798070830797, so its refusal proves nothing"])
+  const noDeploy = await probe({ claims: PR_CLAIMS, token: 'jwt', sites: SITES, assume: fakeAssume(), roleExists: async (account, role) => !(account === '243891826043' && role === 'coderizehq-infra-deploy') })
+  assert.deepEqual(noDeploy.problems, ["coderizehq-infra-deploy doesn't exist in 243891826043, so its refusal proves nothing"])
 
   const noControl = await probe({
     claims: PR_CLAIMS,
@@ -137,4 +137,39 @@ test('fails on an assumed role, another error, a missing role, or a failed contr
     roleExists: allExist,
   })
   assert.match(noControl.problems[0], /the control failed: coderizehq-infra-plan in 798070830797/)
+})
+
+// A record merged before its apply names roles only that apply makes (platform, 2026-11-20: two new preview-only
+// sites' preview roles failed every platform PR until the next apply, which was waiting on one of those PRs).
+test("a site role that isn't made yet is a warning, not a failure, while others of its kind exist and refuse", async () => {
+  const sites = [...SITES, { site: 'new-com', repo: 'new-com-mono', repo_id: 1460000012, account: 'live', live: false }]
+  const r = await probe({ claims: PR_CLAIMS, token: 'jwt', sites, assume: fakeAssume(), roleExists: async (account, role) => role !== 'coderizehq-preview-deploy-new-com' })
+  assert.deepEqual(r.problems, [])
+  assert.deepEqual(r.warnings, ["coderizehq-preview-deploy-new-com doesn't exist in 798070830797 yet (the next apply makes it), so nothing was proved about it; the first PR after that apply probes it"])
+  assert.equal(r.rows.find((x) => x.role === 'coderizehq-preview-deploy-new-com').result, 'not made yet')
+})
+
+test('every role of one kind missing in an account fails: that is what a wrong role name looks like', async () => {
+  const r = await probe({ claims: PR_CLAIMS, token: 'jwt', sites: SITES, assume: fakeAssume(), roleExists: async (account, role) => !role.startsWith('coderizehq-preview-deploy-') })
+  assert.deepEqual(r.problems, ['none of the 2 coderizehq-preview-deploy-* roles exists in 798070830797, so no refusal of that kind proved anything: is the role name right?'])
+  assert.equal(r.warnings.length, 2)
+  const live = await probe({ claims: PR_CLAIMS, token: 'jwt', sites: SITES, assume: fakeAssume(), roleExists: async (account, role) => role !== 'coderizehq-live-publish-sbmcdn-com' })
+  assert.match(live.problems.join('\n'), /none of the 1 coderizehq-live-publish-\* roles exists in 243891826043/)
+})
+
+test("a missing role that STS didn't refuse with AccessDenied, or that was assumed, still fails as before", async () => {
+  const r = await probe({
+    claims: PR_CLAIMS,
+    token: 'jwt',
+    sites: SITES,
+    assume: fakeAssume({ 'arn:aws:iam::243891826043:role/coderizehq-live-publish-sbmcdn-com': { assumed: true } }),
+    roleExists: async () => false,
+  })
+  assert.match(r.problems.join('\n'), /coderizehq-live-publish-sbmcdn-com in 243891826043 was assumed/)
+})
+
+test('kinds are the role name without its site', () => {
+  assert.equal(kindOf('coderizehq-preview-deploy-a-com'), 'coderizehq-preview-deploy')
+  assert.equal(kindOf('coderizehq-live-publish-a-com'), 'coderizehq-live-publish')
+  assert.equal(kindOf('coderizehq-infra-deploy'), 'coderizehq-infra-deploy')
 })

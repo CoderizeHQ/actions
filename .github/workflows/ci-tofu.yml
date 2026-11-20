@@ -125,9 +125,9 @@ jobs:
 
   # The live negative trust tests (plan, Phase 2 "Who can change what"): this job's OIDC token, a platform PR running
   # ci-tofu.yml, must be refused by every role it must never reach, each refusal an AccessDenied from STS for a role
-  # that exists. platform's trust.test.mjs proves each condition alone against the templates; this proves the deployed
-  # policies. The control: the same token must assume coderizehq-infra-plan in each account. Any role assumed fails
-  # the job, and its credentials are never read.
+  # that exists (a site role the next apply will make only warns). platform's trust.test.mjs proves each condition
+  # alone against the templates; this proves the deployed policies. The control: the same token must assume
+  # coderizehq-infra-plan in each account. Any role assumed fails the job, and its credentials are never read.
   trust:
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
