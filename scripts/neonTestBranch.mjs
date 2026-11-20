@@ -3,11 +3,18 @@
 // tests, and deletes it in another job after, whatever happened. The CI project holds no client data: its main is an
 // empty database, and must stay that way.
 //
-// The API key (NEON_CI_API_KEY, scoped to the CI project) only ever reaches these two jobs, which run no code from the
-// repo under test: they check out nothing but actions at this workflow's own commit. The tests get a role and a
-// database made on this branch alone (`ci_tests`, owning `tests`), with a random password Neon generates: that role
-// exists nowhere else (not on main, not on other runs' branches) and goes when the branch is deleted. The project's
-// own owner password never reaches a test.
+// The API key (NEON_CI_API_KEY, scoped to the CI project) is used only in these two jobs, which run no code from the
+// repo under test: they check out nothing but actions at this workflow's own commit, and refuse to run in actions'
+// own CI, where that commit is the PR's. The tests get a role and a database made on this branch alone (`ci_tests`,
+// owning `tests`; Neon makes API roles members of neon_superuser on their branch), with a random password Neon
+// generates: that role exists nowhere else (not on main, not on other runs' branches) and goes when the branch is
+// deleted. The project's own owner password never reaches a test.
+//
+// Known limits, for James to decide on (actions #34): the key is an organization secret each API repo's ci.yml passes
+// in, and a PR's own ci.yml runs on that PR, so someone who can push a branch to an API repo could hand the key to
+// their own code. It reaches only the CI project (no client data); the cost would be branches and computes there. The
+// branch role's password shows in the ci-node log's step environment; it opens only that run's branch, which the run
+// deletes.
 //
 //   node scripts/neonTestBranch.mjs create   sweeps leftovers (best effort), names the branch from the run, makes it
 //                                            with a compute, a role and a database, and writes branch, host (pooled)
@@ -27,7 +34,11 @@ export const MAX_AGE_MS = 3 * 60 * 60 * 1000
 
 /** The branch name for this run: ci-<repo>-<run id>-<attempt>, within Neon's 256 characters. */
 export function branchName({ repository, runId, attempt }) {
-  const repo = String(repository ?? '').split('/').pop()
+  const repo = String(repository ?? '')
+    .split('/')
+    .pop()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
   if (!/^[a-z0-9-]+$/.test(repo) || !/^\d+$/.test(String(runId)) || !/^\d+$/.test(String(attempt ?? '1'))) {
     throw new Error('neonTestBranch: GITHUB_REPOSITORY, GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT are needed')
   }
@@ -81,7 +92,8 @@ export function neon({ apiKey, projectId, fetchImpl = fetch, wait = (ms) => new 
       for (let page = 0; page < 100; page++) {
         const got = await call('GET', `/branches?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
         all.push(...(got?.branches ?? []))
-        cursor = got?.pagination?.next ?? ''
+        // Neon's continuation token; `cursor` in its current API, `next` in older answers.
+        cursor = got?.pagination?.cursor ?? got?.pagination?.next ?? ''
         if (!cursor || !(got?.branches ?? []).length) break
       }
       return all
@@ -119,8 +131,8 @@ export async function create(api, name, setOutput = output, log = console.log) {
   if (!password) throw new Error(`Neon made no ${ROLE} role on branch ${id}`)
   await api.database(id)
   setOutput('host', pooledHost(host))
-  // Not masked here: a masked value can't leave the job as an output. The test job masks it before any use. It opens
-  // only this branch's own empty database, which is deleted after the run.
+  // Not masked here: a masked value can't leave the job as an output. ci-node masks it in its script, though its step
+  // environment shows it first. It opens only this branch's own empty database, which is deleted after the run.
   setOutput('password', password)
   return { id, host: pooledHost(host) }
 }

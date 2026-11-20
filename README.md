@@ -106,7 +106,13 @@ that branch alone, with a password Neon generates: nothing they hold opens the p
 branch, and both go with the branch. The repo's test setup migrates the empty database. **The CI project's main must
 stay empty**, and its owner password never goes to a test. If `test-database` is on and no branch was made, the Tests
 step fails, so `ci / ci-node` can't pass without it. Leftover `ci-` branches over three hours old (longer than the
-60-minute job timeout) are swept first, best effort (`scripts/neonTestBranch.mjs`).
+60-minute job timeout) are swept first, best effort (`scripts/neonTestBranch.mjs`). The testdb jobs refuse to run in
+this repo's own CI, where the workflow's commit is the PR's own code.
+
+Known limits: `NEON_CI_API_KEY` is an organization secret each API repo's ci.yml passes in, and a PR's own ci.yml runs
+on that PR, so someone who can push a branch to an API repo could hand the key to their own code. It reaches only the
+CI project (no client data); the cost would be branches and computes there. The branch role's password shows in the
+ci-node log's step environment; it opens only that run's branch, which the run deletes.
 
 ### deploy-preview
 

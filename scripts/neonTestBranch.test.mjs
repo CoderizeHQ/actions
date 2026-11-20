@@ -5,7 +5,7 @@ import { API, DATABASE, MAX_AGE_MS, ROLE, branchName, create, neon, pooledHost, 
 
 test('branchName names the run, and refuses anything odd', () => {
   assert.equal(branchName({ repository: 'CoderizeHQ/mrleejunkcarbuyer-com-mono', runId: '123', attempt: '2' }), 'ci-mrleejunkcarbuyer-com-mono-123-2')
-  assert.throws(() => branchName({ repository: 'CoderizeHQ/x;rm', runId: '1', attempt: '1' }))
+  assert.equal(branchName({ repository: 'CoderizeHQ/My_Repo.v2', runId: '7', attempt: '1' }), 'ci-my-repo-v2-7-1')
   assert.throws(() => branchName({ repository: 'CoderizeHQ/x', runId: 'abc', attempt: '1' }))
 })
 
@@ -104,7 +104,8 @@ test('create writes the branch id before failing on a missing host, so cleanup s
 test('listAll follows the cursor', async () => {
   let n = 0
   const { fetchImpl } = fakeFetch({
-    'GET /projects/p/branches': () => (++n === 1 ? { branches: [{ id: 'br-1' }], pagination: { next: 'c2' } } : { branches: [{ id: 'br-2' }], pagination: {} }),
+    'GET /projects/p/branches': (url) =>
+      ++n === 1 ? { branches: [{ id: 'br-1' }], pagination: { cursor: 'c2' } } : (assert.ok(url.includes('cursor=c2')), { branches: [{ id: 'br-2' }], pagination: {} }),
   })
   const all = await neon({ apiKey: 'k', projectId: 'p', fetchImpl }).listAll()
   assert.deepEqual(all.map((b) => b.id), ['br-1', 'br-2'])

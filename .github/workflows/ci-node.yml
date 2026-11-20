@@ -55,7 +55,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
         run: |
-          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # In actions itself the workflow commit is the PR's own code, which must never run beside the key.
+          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "::error::test-database is not available in actions' own CI"; exit 1; fi
           shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
           [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
@@ -208,7 +209,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
         run: |
-          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; exit 0; fi
+          # In actions itself the workflow commit is the PR's own code, which must never run beside the key.
+          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "::error::test-database is not available in actions' own CI"; exit 1; fi
           shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
           [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
