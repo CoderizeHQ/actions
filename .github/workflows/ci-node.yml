@@ -11,16 +11,20 @@ name: ci-node
 on:
   workflow_call:
     inputs:
-      # An API whose tests need Postgres (STANDARDS.md 6): a temporary branch of the CI Neon project, made before the
-      # tests and deleted after (scripts/neonTestBranch.mjs). Its URLs reach the tests as DATABASE_URL (pooled) and
-      # DIRECT_URL. The repo's test setup migrates the empty database itself. The caller passes the key:
+      # An API whose tests need Postgres (STANDARDS.md 6): a temporary branch of the CI Neon project (no client data,
+      # its main an empty database), made by `testdb-create` before the tests and deleted by `testdb-delete` after
+      # (scripts/neonTestBranch.mjs). Those two jobs hold the API key and run no code from the repo under test; the
+      # tests get DATABASE_URL (pooled) and DIRECT_URL, built from the branch's host and the CI database password. The
+      # repo's test setup migrates the empty database itself. The caller passes both secrets:
       #   with: { test-database: true }
-      #   secrets: { NEON_CI_API_KEY: ${{ secrets.NEON_CI_API_KEY }} }
+      #   secrets: { NEON_CI_API_KEY: ${{ secrets.NEON_CI_API_KEY }}, NEON_CI_DATABASE_PASSWORD: ${{ secrets.NEON_CI_DATABASE_PASSWORD }} }
       test-database:
         type: boolean
         default: false
     secrets:
       NEON_CI_API_KEY:
+        required: false
+      NEON_CI_DATABASE_PASSWORD:
         required: false
 
 permissions:
@@ -32,7 +36,50 @@ env:
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
+  # Makes the test branch. Holds the API key; checks out only actions at this workflow's commit, never the repo under
+  # test, so nothing from a PR runs here.
+  testdb-create:
+    if: inputs.test-database
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      branch: ${{ steps.create.outputs.branch }}
+      host: ${{ steps.create.outputs.host }}
+    steps:
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
+        run: |
+          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; exit 0; fi
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Make the test branch
+        id: create
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          NODE_OPTIONS: ''
+        run: node actions/scripts/neonTestBranch.mjs create
+
   ci-node:
+    needs: testdb-create
+    # Runs with or without a test database; never after a failed or cancelled branch creation.
+    if: ${{ !cancelled() && (needs.testdb-create.result == 'success' || needs.testdb-create.result == 'skipped') }}
+    timeout-minutes: 60
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read
@@ -115,31 +162,58 @@ jobs:
           [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
           pnpm exec eslint .
 
-      # The CI project's id is an organization variable; its key, scoped to that project only, a secret the caller
-      # passes. Leftover branches from killed runs are swept first, then this run's branch is made.
-      - name: Test database
-        id: testdb
-        if: inputs.test-database
-        env:
-          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
-          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
-        run: |
-          node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" sweep
-          node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" create
-
+      # With a test database: its URLs, from the branch's host (an output of testdb-create) and the CI database password.
+      # The API key never reaches this job.
       - name: Tests
         working-directory: repo
+        env:
+          TEST_DB_HOST: ${{ needs.testdb-create.outputs.host }}
+          TEST_DB_PASSWORD: ${{ secrets.NEON_CI_DATABASE_PASSWORD }}
         run: |
           if ! jq -e '.scripts.test' package.json >/dev/null; then
             echo "::notice::package.json has no test script, so there are no tests to run"
             exit 0
           fi
+          if [ -n "$TEST_DB_HOST" ]; then
+            [ -n "$TEST_DB_PASSWORD" ] || { echo "::error::test-database needs the NEON_CI_DATABASE_PASSWORD secret"; exit 1; }
+            export DATABASE_URL="postgresql://neondb_owner:${TEST_DB_PASSWORD}@${TEST_DB_HOST}/neondb?sslmode=require"
+            export DIRECT_URL="postgresql://neondb_owner:${TEST_DB_PASSWORD}@${TEST_DB_HOST/-pooler./.}/neondb?sslmode=require"
+          fi
+          unset TEST_DB_PASSWORD
           pnpm test
 
-      - name: Delete the test database
-        if: always() && steps.testdb.outputs.branch != ''
+  # Deletes the test branch whatever happened. Holds the API key; like testdb-create, runs no code from the repo.
+  testdb-delete:
+    needs: [testdb-create, ci-node]
+    if: ${{ always() && needs.testdb-create.outputs.branch != '' }}
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/ci-node.yml
+        run: |
+          if [ "$GITHUB_REPOSITORY" = CoderizeHQ/actions ]; then echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"; exit 0; fi
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"             --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of ci-node.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      - name: Delete the test branch
         env:
           NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
           NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
-          BRANCH: ${{ steps.testdb.outputs.branch }}
-        run: node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" delete "$BRANCH"
+          NODE_OPTIONS: ''
+          BRANCH: ${{ needs.testdb-create.outputs.branch }}
+        run: node actions/scripts/neonTestBranch.mjs delete "$BRANCH"

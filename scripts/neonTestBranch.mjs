@@ -1,25 +1,25 @@
 // ci-node's test database (STANDARDS.md 6: jobs get no Docker; a test that needs Postgres uses a temporary Neon
-// branch). With `test-database: true`, ci-node makes a branch of the CI Neon project before the tests and deletes it
-// after, whatever happened. The CI project holds no client data: its main is an empty database, so a branch starts
-// empty and the repo's own test setup migrates it. Its API key (NEON_CI_API_KEY, an organization secret) is scoped to
-// that one project, so a test run can never reach a client database.
+// branch). With `test-database: true`, ci-node makes a branch of the CI Neon project in a job of its own before the
+// tests, and deletes it in another job after, whatever happened. The CI project holds no client data: its main is an
+// empty database, so a branch starts empty and the repo's own test setup migrates it.
 //
-//   node scripts/neonTestBranch.mjs create   names the branch from the run, makes it with a compute, writes
-//                                            DATABASE_URL and DIRECT_URL (masked) to GITHUB_ENV and the branch id to
-//                                            GITHUB_OUTPUT
+// The API key (NEON_CI_API_KEY, scoped to the CI project) only ever reaches these two jobs, which run no code from the
+// repo under test: they check out nothing but actions at this workflow's own commit. The test job gets the branch's
+// host as a job output and builds its URLs from the CI database's role password (NEON_CI_DATABASE_PASSWORD), which
+// opens nothing but empty CI databases. The password is never in an output.
+//
+//   node scripts/neonTestBranch.mjs create   sweeps leftovers, names the branch from the run, makes it with a compute,
+//                                            and writes branch, host (pooled) and database to GITHUB_OUTPUT
 //   node scripts/neonTestBranch.mjs delete <branch id>
-//   node scripts/neonTestBranch.mjs sweep    deletes ci- branches older than two hours (a run killed before its
-//                                            delete step), so the project never fills up
 //
 // Env: NEON_API_KEY, NEON_PROJECT_ID, and for create GITHUB_REPOSITORY, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT.
-
-import { appendFileSync } from 'node:fs'
 
 import { output, runIfMain } from './lib/report.mjs'
 
 export const API = 'https://console.neon.tech/api/v2'
 export const PREFIX = 'ci-'
-export const MAX_AGE_MS = 2 * 60 * 60 * 1000
+// Longer than ci-node's job timeout (60 minutes), so a sweep never removes a branch a running job still uses.
+export const MAX_AGE_MS = 3 * 60 * 60 * 1000
 
 /** The branch name for this run: ci-<repo>-<run id>-<attempt>, within Neon's 256 characters. */
 export function branchName({ repository, runId, attempt }) {
@@ -30,16 +30,14 @@ export function branchName({ repository, runId, attempt }) {
   return `${PREFIX}${repo}-${runId}-${attempt ?? 1}`.slice(0, 256)
 }
 
-/** The pooled URL's direct twin: the same URL without -pooler in the host (Migrate needs a real session). */
-export function directUrl(pooled) {
-  const u = new URL(pooled)
-  u.hostname = u.hostname.replace('-pooler.', '.')
-  return u.toString()
-}
-
-/** Branches to sweep: ours (ci- prefix), older than MAX_AGE_MS, never the project's default. */
+/** Branches to sweep: ours (ci- prefix), older than MAX_AGE_MS, never the project's default or primary. */
 export function stale(branches, now = Date.now()) {
   return branches.filter((b) => b.name?.startsWith(PREFIX) && !b.default && !b.primary && now - Date.parse(b.created_at) > MAX_AGE_MS)
+}
+
+/** The pooled twin of an endpoint host: ep-x.c-1... -> ep-x-pooler.c-1... */
+export function pooledHost(host) {
+  return host.includes('-pooler.') ? host : host.replace(/^([^.]+)\./, '$1-pooler.')
 }
 
 /** A small Neon API client. `fetchImpl` is for tests. */
@@ -52,7 +50,7 @@ export function neon({ apiKey, projectId, fetchImpl = fetch }) {
       body: body ? JSON.stringify(body) : undefined,
     })
     if (res.status === 404 && method === 'DELETE') return null
-    if (!res.ok) throw new Error(`Neon ${method} ${path}: HTTP ${res.status}`)
+    if (!res.ok) throw new Error(`Neon ${method} ${path.split('?')[0]}: HTTP ${res.status}`)
     return res.status === 204 ? null : res.json()
   }
   return {
@@ -62,19 +60,32 @@ export function neon({ apiKey, projectId, fetchImpl = fetch }) {
         endpoints: [{ type: 'read_write', autoscaling_limit_min_cu: 0.25, autoscaling_limit_max_cu: 0.5, suspend_timeout_seconds: 300 }],
       }),
     remove: (id) => call('DELETE', `/branches/${id}`),
-    list: () => call('GET', '/branches'),
+    /** Every branch, following the API's cursor, so a large backlog is swept whole. */
+    async listAll() {
+      const all = []
+      let cursor = ''
+      for (let page = 0; page < 100; page++) {
+        const got = await call('GET', `/branches?limit=400${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`)
+        all.push(...(got?.branches ?? []))
+        cursor = got?.pagination?.next ?? ''
+        if (!cursor || !(got?.branches ?? []).length) break
+      }
+      return all
+    },
   }
 }
 
-/** Makes the branch and returns its id and the two URLs. */
-export async function create(api, name) {
+/** Sweeps leftovers, then makes this run's branch. The id is written before anything can fail, so cleanup can run. */
+export async function create(api, name, setOutput = output) {
+  for (const b of stale(await api.listAll())) await api.remove(b.id)
   const made = await api.create(name)
   const id = made?.branch?.id
-  const pooled = made?.connection_uris?.[0]?.connection_uri
-  if (!id || !pooled) throw new Error('Neon made no branch or no connection URI')
-  const u = new URL(pooled)
-  u.hostname = u.hostname.includes('-pooler.') ? u.hostname : u.hostname.replace(/^([^.]+)\./, '$1-pooler.')
-  return { id, databaseUrl: u.toString(), directUrl: directUrl(u.toString()) }
+  if (!id) throw new Error('Neon made no branch')
+  setOutput('branch', id)
+  const host = made?.endpoints?.[0]?.host
+  if (!host) throw new Error(`Neon made branch ${id} without a compute host`)
+  setOutput('host', pooledHost(host))
+  return { id, host: pooledHost(host) }
 }
 
 async function main() {
@@ -83,23 +94,13 @@ async function main() {
   if (command === 'create') {
     const name = branchName({ repository: process.env.GITHUB_REPOSITORY, runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT })
     const made = await create(api, name)
-    // Masked before anything could print them; only the job's own environment gets them.
-    console.log(`::add-mask::${made.databaseUrl}`)
-    console.log(`::add-mask::${made.directUrl}`)
-    console.log(`::add-mask::${new URL(made.databaseUrl).password}`)
-    if (process.env.GITHUB_ENV) appendFileSync(process.env.GITHUB_ENV, `DATABASE_URL=${made.databaseUrl}\nDIRECT_URL=${made.directUrl}\n`)
-    output('branch', made.id)
     console.log(`Test database: Neon branch ${name} (${made.id})`)
   } else if (command === 'delete') {
     if (!/^br-[a-z0-9-]+$/.test(id ?? '')) throw new Error('neonTestBranch delete: a br-... branch id is needed')
     await api.remove(id)
     console.log(`Deleted the test branch ${id}`)
-  } else if (command === 'sweep') {
-    const old = stale((await api.list())?.branches ?? [])
-    for (const b of old) await api.remove(b.id)
-    console.log(`Swept ${old.length} leftover test branch(es)`)
   } else {
-    throw new Error('usage: neonTestBranch.mjs create | delete <branch id> | sweep')
+    throw new Error('usage: neonTestBranch.mjs create | delete <branch id>')
   }
 }
 
