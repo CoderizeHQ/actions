@@ -8,7 +8,8 @@ name: release
 #   with: { site: admin-example-com, deployment: live-admin-example-com }
 # Only the site name comes in. The live bucket is coderizehq-live-<site> by contract; the distribution is the one whose
 # Comment is exactly the site name (platform sets it, and the role may ListDistributions), and the domain is that
-# distribution's apex alias. So nothing about the site is kept in its own repo.
+# distribution's apex alias. So nothing about the site is kept in its own repo. A distribution with no aliases yet (a
+# site moving in by an alias move, platform's alias_move) is published to and checked on its own *.cloudfront.net name.
 #
 # `verify` decides through GitHub's API, with no AWS access: a version tag must be the release App's merged
 # release-please-- PR, release files only, approved by James at its final commit; a run on main must be a gap of
