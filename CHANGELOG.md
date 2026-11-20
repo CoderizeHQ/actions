@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/CoderizeHQ/actions/compare/v1.3.0...v1.4.0) (2026-11-20)
+
+
+### Features
+
+* give ci-node a throwaway Postgres database for API tests, on the runner VM ([#34](https://github.com/CoderizeHQ/actions/issues/34)) ([d9d68c0](https://github.com/CoderizeHQ/actions/commit/d9d68c0775d17c0e1107913f1ea7f39ac651941f))
+
 ## [1.3.0](https://github.com/CoderizeHQ/actions/compare/v1.2.0...v1.3.0) (2026-11-20)
 
 
