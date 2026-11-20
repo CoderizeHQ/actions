@@ -117,6 +117,14 @@ test('a delete of a branch already gone is fine; other failures throw', async ()
   await assert.rejects(api500.remove('br-x'), /HTTP 500/)
 })
 
+test('a 423 (an operation still running) is retried, then the call goes through', async () => {
+  let n = 0
+  const fetchImpl = async () => (++n < 3 ? { ok: false, status: 423 } : { ok: true, status: 200, json: async () => ({ role: { password: 'x' } }) })
+  const got = await neon({ apiKey: 'k', projectId: 'p', fetchImpl, wait: async () => {} }).role('br-1')
+  assert.equal(n, 3)
+  assert.equal(got.role.password, 'x')
+})
+
 test('neon refuses to start without a key or project', () => {
   assert.throws(() => neon({ apiKey: '', projectId: 'p' }), /NEON_API_KEY/)
 })

@@ -44,15 +44,23 @@ export function pooledHost(host) {
   return host.includes('-pooler.') ? host : host.replace(/^([^.]+)\./, '$1-pooler.')
 }
 
-/** A small Neon API client. `fetchImpl` is for tests. */
-export function neon({ apiKey, projectId, fetchImpl = fetch }) {
+/**
+ * A small Neon API client. `fetchImpl` and `wait` are for tests. Neon answers 423 while an earlier operation on the
+ * project (such as the branch's own creation) is still running, so a 423 is retried for up to about a minute.
+ */
+export function neon({ apiKey, projectId, fetchImpl = fetch, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   if (!apiKey || !projectId) throw new Error('neonTestBranch: NEON_API_KEY and NEON_PROJECT_ID are needed (test-database: true)')
   const call = async (method, path, body) => {
-    const res = await fetchImpl(`${API}/projects/${projectId}${path}`, {
-      method,
-      headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
-      body: body ? JSON.stringify(body) : undefined,
-    })
+    let res
+    for (let attempt = 0; attempt < 30; attempt++) {
+      res = await fetchImpl(`${API}/projects/${projectId}${path}`, {
+        method,
+        headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json', ...(body ? { 'content-type': 'application/json' } : {}) },
+        body: body ? JSON.stringify(body) : undefined,
+      })
+      if (res.status !== 423) break
+      await wait(2000)
+    }
     if (res.status === 404 && method === 'DELETE') return null
     if (!res.ok) throw new Error(`Neon ${method} ${path.split('?')[0]}: HTTP ${res.status}`)
     return res.status === 204 ? null : res.json()
