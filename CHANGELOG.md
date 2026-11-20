@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.0](https://github.com/CoderizeHQ/actions/compare/v1.5.0...v1.6.0) (2026-11-20)
+
+
+### Features
+
+* release a site to its distribution before an alias move ([#42](https://github.com/CoderizeHQ/actions/issues/42)) ([0703343](https://github.com/CoderizeHQ/actions/commit/07033431e504b11d924a1daac830357c7499b4c0))
+
 ## [1.5.0](https://github.com/CoderizeHQ/actions/compare/v1.4.2...v1.5.0) (2026-11-20)
 
 
