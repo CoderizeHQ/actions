@@ -98,3 +98,9 @@ test('always sends from notify@notify.coderize.dev to ops@ with the coderizehq-n
 test('the role ARN is the fixed live-account notify role', () => {
   assert.equal(NOTIFY_ROLE_ARN, 'arn:aws:iam::243891826043:role/coderizehq-notify-send')
 })
+
+test("a go-live release is named as such, and says it went to the new distribution before the alias move", () => {
+  const ok = message({ ...base, workflow: 'release', ref: 'refs/heads/main', results: 'verify=success,publish=success', kind: 'go-live', siteUrl: 'https://d111111abcdef8.cloudfront.net' })
+  assert.equal(ok.subject, '[CoderizeHQ] released sbmcdn-com go-live release')
+  assert.match(ok.text, /^Release: go-live, main's head on the new distribution before its alias move \(platform's apply\)$/m)
+})

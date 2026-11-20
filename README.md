@@ -159,6 +159,13 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
      how that commit is built or released.
      The run still publishes the build deploy-preview stored for the run's own commit, never a rebuild. A gap with no
      dependency update (nothing new, or platform syncs alone) publishes nothing; anything else is left for James;
+   - `refs/heads/main` from the `repository_dispatch` `go-live-release` (a go-live release): platform's apply sends it,
+     as the platform App (`coderizehq-platform[bot]`, the only sender accepted), with `client_payload.site` naming the
+     site, for a site going live by an alias move whose new distribution has no aliases yet. It publishes main's head,
+     so the site's first publish needs no release PR and no `Release-As` commit. `publish` refuses it for a
+     distribution that serves any name, so it can only reach the new distribution's own `*.cloudfront.net` name, never
+     a visitor: James's alias move (platform's `alias-move.yml`) checks that build before the names move. A dispatch
+     from anyone else, or naming another site, is refused, never taken for a dependency run;
    - anything else is refused.
 2. `publish` (the `release` environment, the live role; one queue per site):
    - finds the live distribution: the one whose Comment is exactly `<site>` (platform sets it), and the domain from

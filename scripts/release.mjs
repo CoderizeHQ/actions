@@ -4,6 +4,9 @@
 // - a version tag (refs/tags/vX.Y.Z): release-check's rules (the release App's merged release-please-- PR, release
 //   files only, James's approval at its final commit);
 // - main (the weekly dependency run): release-check/dependencyCheck.mjs;
+// - main, from the repository_dispatch `go-live-release` that platform's apply sends as the platform App for a site
+//   whose new distribution has no aliases yet (GO_LIVE below): its first publish, which publish refuses for a
+//   distribution serving any name, so it never reaches a visitor before James's alias move;
 // - anything else is refused.
 //
 // `node release.mjs publish` (the release environment, as coderizehq-live-publish-<site>) then:
@@ -47,10 +50,28 @@ const VERSION_TAG = /^refs\/tags\/v\d+\.\d+\.\d+$/
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
- * @returns {Promise<{ publish: boolean, kind?: 'version' | 'dependency', pr?: number | null, approver?: string | null,
+ * A site's go-live release (platform docs/go-live.md, "Zero-downtime cutover"): platform's apply sends the site's repo
+ * this repository_dispatch, as the platform App, for a site going live by an alias move whose new distribution has no
+ * aliases yet. It publishes main's head, so the site's first publish needs no release PR and no Release-As commit, and
+ * it can't reach a visitor: publish refuses a distribution that serves any name (only its own *.cloudfront.net name
+ * answers until James runs platform's alias-move.yml, which checks the site first). Everything a visitor sees later
+ * still goes through a version release.
+ */
+export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platform[bot]'] }
+
+/**
+ * @returns {Promise<{ publish: boolean, kind?: 'version' | 'dependency' | 'go-live', pr?: number | null, approver?: string | null,
  *   prs?: number[], reasons: string[] }>}
  */
-export async function verify({ token, repo, ref, sha, checks = { checkRelease, checkDependencyRun } }) {
+export async function verify({ token, repo, ref, sha, event, dispatch, sender, site, payloadSite, checks = { checkRelease, checkDependencyRun } }) {
+  if (event === 'repository_dispatch' && dispatch === GO_LIVE.action) {
+    const reasons = []
+    if (ref !== 'refs/heads/main') reasons.push(`a go-live release runs only on main, not ${ref}`)
+    if (!GO_LIVE.senders.includes(sender)) reasons.push(`a go-live release comes only from platform's apply (${GO_LIVE.senders.join(', ')}), not ${sender || 'an unknown sender'}`)
+    if (!site || payloadSite !== site) reasons.push(`this go-live release names ${payloadSite || 'no site'}, not ${site}`)
+    if (reasons.length) return { publish: false, reasons }
+    return { publish: true, kind: 'go-live', pr: null, approver: null, reasons: [] }
+  }
   if (VERSION_TAG.test(ref)) {
     const r = await checks.checkRelease(token, repo, ref)
     const reasons = [...r.reasons]
@@ -260,10 +281,30 @@ export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha
   }
 }
 
+/** The release kinds publish accepts. */
+export const KINDS = ['version', 'dependency', 'go-live']
+
+/** What allowed a release, in a line. */
+export function describe({ kind, pr, approver, prs }) {
+  if (kind === 'version') return `release PR #${pr}, approved by ${approver}`
+  if (kind === 'go-live') return "go-live release of main's head, before the alias move"
+  return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}`
+}
+
+/**
+ * A go-live release publishes only to a distribution that serves no name yet (findLive's domain null): until James
+ * runs platform's alias-move.yml, nobody but its own *.cloudfront.net name reaches it. Anything else is refused.
+ * @returns {string | null} the refusal
+ */
+export function goLiveRefusal(kind, { distributionId, domain, site }) {
+  if (kind !== 'go-live' || !domain) return null
+  return `a go-live release publishes only to a distribution with no aliases yet (before its alias move), but ${distributionId} serves ${domain}: release ${site} with a release PR instead`
+}
+
 async function verifyMain() {
-  const { GH_TOKEN: token, REPO: repo, REF: ref, SHA: sha } = process.env
+  const { GH_TOKEN: token, REPO: repo, REF: ref, SHA: sha, EVENT: event, DISPATCH: dispatch, SENDER: sender, SITE: site, PAYLOAD_SITE: payloadSite } = process.env
   if (!token || !repo || !ref) throw new Error('GH_TOKEN, REPO and REF must be set')
-  const result = await verify({ token, repo, ref, sha: checkSha(sha) })
+  const result = await verify({ token, repo, ref, sha: checkSha(sha), event, dispatch, sender, site, payloadSite })
   output('publish', String(result.publish))
   if (result.nothing) {
     console.log('::notice::no dependency update since the last release; nothing to publish')
@@ -281,7 +322,7 @@ async function verifyMain() {
   output('release-pr', result.pr ?? '')
   output('approver', result.approver ?? '')
   output('dependency-prs', (result.prs ?? []).join(','))
-  const why = result.kind === 'version' ? `release PR #${result.pr}, approved by ${result.approver}` : `dependency-only: Renovate PRs ${result.prs.map((n) => `#${n}`).join(', ')}`
+  const why = describe(result)
   console.log(`release of ${sha} accepted (${why})`)
   summary(`### Release accepted\n\n\`${sha}\`: ${why}.`)
 }
@@ -293,7 +334,7 @@ async function publishMain() {
   const commit = checkSha(env.COMMIT)
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const { REPO: repo, GH_TOKEN: token } = env
-  if (!['version', 'dependency'].includes(env.KIND)) throw new Error(`unknown release kind ${env.KIND}`)
+  if (!KINDS.includes(env.KIND)) throw new Error(`unknown release kind ${env.KIND}`)
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
 
   const problems = checkClaims(await requestClaims(), { workflow: 'release.yml', workflowSha, repo, commit })
@@ -302,6 +343,8 @@ async function publishMain() {
   const { awsStore } = await import('./lib/aws.mjs')
   const store = awsStore()
   const { distributionId, domain, host } = await findLive(store, site)
+  const refusal = goLiveRefusal(env.KIND, { distributionId, domain, site })
+  if (refusal) throw new Error(refusal)
   if (!domain) console.log(`::notice::${site}: the distribution has no aliases yet (an alias move); publishing to it and checking it at https://${host}`)
   output('site-url', `https://${host}`)
 
@@ -319,7 +362,7 @@ async function publishMain() {
   const stored = await waitForManifest({ store, site, commit })
   base.manifestSha256 = hashes(stored.body).sha256
 
-  const what = base.kind === 'version' ? `release PR #${base.pr}, approved by ${base.approver}` : 'dependency-only release'
+  const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs })
   const deployment = await gh(token, `/repos/${repo}/deployments`, {
     method: 'POST',
     body: {

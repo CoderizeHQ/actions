@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { manifestKey, PREVIEW_BUCKET, storedKey } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
 import { memoryStore } from './lib/memoryStore.mjs'
-import { checkLiveSite, deploymentEnvironment, deploymentPayload, findLive, isSiteHost, publishLive, robotsProblems, verify } from './release.mjs'
+import { checkLiveSite, deploymentEnvironment, deploymentPayload, describe, findLive, goLiveRefusal, isSiteHost, KINDS, publishLive, robotsProblems, verify } from './release.mjs'
 
 const site = 'sbmcdn-com'
 const domain = 'sbmcdn.com'
@@ -210,4 +210,51 @@ test("the deployment is recorded under live, or a site's own live-<site> when it
   // Never another site's environment, and nothing else.
   assert.throws(() => deploymentEnvironment('admin-example-com', 'live-example-com'), /live or live-admin-example-com/)
   assert.throws(() => deploymentEnvironment('example-com', 'production'), /live or live-example-com/)
+})
+
+// platform's go-live: its apply sends go-live-release, as the platform App, for a site whose new distribution has no
+// aliases yet, so the site's first publish needs no release PR (platform docs/go-live.md).
+const goLive = { token: 't', repo, ref: 'refs/heads/main', sha: commit, event: 'repository_dispatch', dispatch: 'go-live-release', sender: 'coderizehq-platform[bot]', site, payloadSite: site }
+
+test("verify: platform's go-live dispatch for this site publishes main's head, with no release check", async () => {
+  const never = { checkRelease: async () => assert.fail('no release check'), checkDependencyRun: async () => assert.fail('no dependency check') }
+  assert.deepEqual(await verify({ ...goLive, checks: never }), { publish: true, kind: 'go-live', pr: null, approver: null, reasons: [] })
+})
+
+test('verify: a go-live dispatch from anyone else, for another site, or off main is refused, never treated as a dependency run', async () => {
+  const never = { checkRelease: async () => assert.fail('no release check'), checkDependencyRun: async () => assert.fail('no dependency check') }
+  const release = await verify({ ...goLive, sender: 'coderizehq-release[bot]', checks: never })
+  assert.equal(release.publish, false)
+  assert.match(release.reasons[0], /comes only from platform's apply \(coderizehq-platform\[bot\]\), not coderizehq-release\[bot\]/)
+  const other = await verify({ ...goLive, payloadSite: 'other-com', checks: never })
+  assert.deepEqual(other.reasons, [`this go-live release names other-com, not ${site}`])
+  const none = await verify({ ...goLive, payloadSite: '', checks: never })
+  assert.match(none.reasons[0], /names no site/)
+  const tag = await verify({ ...goLive, ref: 'refs/tags/v1.2.3', checks: never })
+  assert.match(tag.reasons[0], /runs only on main, not refs\/tags\/v1\.2\.3/)
+})
+
+test("verify: the weekly dispatch on main is still the dependency run", async () => {
+  const clean = stub(null, { ok: true, prs: [7], reasons: [] })
+  const r = await verify({ ...goLive, dispatch: 'weekly-dependency-release', sender: 'coderizehq-release[bot]', checks: clean })
+  assert.equal(r.kind, 'dependency')
+})
+
+test('publish: a go-live release goes only to a distribution with no aliases yet; one serving its domain is refused', () => {
+  assert.equal(goLiveRefusal('go-live', { distributionId: 'EMOVE', domain: null, site }), null)
+  assert.match(goLiveRefusal('go-live', { distributionId: 'ELIVE', domain, site }), /^a go-live release publishes only to a distribution with no aliases yet \(before its alias move\), but ELIVE serves sbmcdn\.com/)
+  assert.equal(goLiveRefusal('version', { distributionId: 'ELIVE', domain, site }), null)
+  assert.ok(KINDS.includes('go-live'))
+  assert.equal(describe({ kind: 'go-live' }), "go-live release of main's head, before the alias move")
+  assert.equal(describe({ kind: 'dependency', prs: [3] }), 'dependency-only: Renovate PRs #3')
+})
+
+test('release.yml hands verify the event, the dispatch, its sender and its site, as environment only', async () => {
+  const { readFileSync } = await import('node:fs')
+  const wf = readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8')
+  const verifyStep = wf.slice(wf.indexOf('- name: Verify the release'), wf.indexOf('release.mjs verify'))
+  for (const line of ['SITE: ${{ inputs.site }}', 'EVENT: ${{ github.event_name }}', 'DISPATCH: ${{ github.event.action }}', 'SENDER: ${{ github.event.sender.login }}', 'PAYLOAD_SITE: ${{ github.event.client_payload.site }}']) {
+    assert.ok(verifyStep.includes(line), line)
+  }
+  for (const l of wf.split('\n')) if (/run: /.test(l)) assert.doesNotMatch(l, /github\.event\./, l)
 })
