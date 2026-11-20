@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.1](https://github.com/CoderizeHQ/actions/compare/v1.4.0...v1.4.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* keep pnpm's package links intact in the app image layer ([#36](https://github.com/CoderizeHQ/actions/issues/36)) ([1091a6e](https://github.com/CoderizeHQ/actions/commit/1091a6e4924d69ce2467f44f946f2e6fc3961c49))
+
 ## [1.4.0](https://github.com/CoderizeHQ/actions/compare/v1.3.0...v1.4.0) (2026-11-20)
 
 
