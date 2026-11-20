@@ -52,7 +52,7 @@ required workflow that isn't there blocks every PR it covers.
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | none | `contents: read`, `actions: read` | None: no AWS, no secrets |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (optional) | `contents: read`, `actions: read` | None, or with `test-database` the `NEON_CI_API_KEY` secret the caller passes: a key scoped to the CI Neon project only |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
@@ -96,6 +96,12 @@ In this order, so nothing from the site runs before the checks on its committed 
 The PR title, gitleaks, the audit (all as in ci-site), then install, ESLint (with a config) and tests (with a test
 script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of it, and their titles are
 Conventional Commits too (Release Please reads them).
+
+With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6, no Docker in jobs), a temporary branch
+of the CI Neon project (organization variable `NEON_CI_PROJECT_ID`, no client data, its main an empty database) is
+made before the tests and deleted after, whatever happened. The tests get `DATABASE_URL` (pooled) and `DIRECT_URL`,
+masked; the repo's test setup migrates the empty database. Branches left by killed runs (`ci-` and over two hours
+old) are swept at the start of each run (`scripts/neonTestBranch.mjs`).
 
 ### deploy-preview
 

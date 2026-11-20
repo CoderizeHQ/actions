@@ -10,6 +10,18 @@ name: ci-node
 # config) and tests (where package.json has a test script). The scripts come from this workflow's own commit.
 on:
   workflow_call:
+    inputs:
+      # An API whose tests need Postgres (STANDARDS.md 6): a temporary branch of the CI Neon project, made before the
+      # tests and deleted after (scripts/neonTestBranch.mjs). Its URLs reach the tests as DATABASE_URL (pooled) and
+      # DIRECT_URL. The repo's test setup migrates the empty database itself. The caller passes the key:
+      #   with: { test-database: true }
+      #   secrets: { NEON_CI_API_KEY: ${{ secrets.NEON_CI_API_KEY }} }
+      test-database:
+        type: boolean
+        default: false
+    secrets:
+      NEON_CI_API_KEY:
+        required: false
 
 permissions:
   contents: read
@@ -103,6 +115,18 @@ jobs:
           [ -x node_modules/.bin/eslint ] || { echo "::error::the repo has an ESLint config but doesn't install eslint; add it to devDependencies"; exit 1; }
           pnpm exec eslint .
 
+      # The CI project's id is an organization variable; its key, scoped to that project only, a secret the caller
+      # passes. Leftover branches from killed runs are swept first, then this run's branch is made.
+      - name: Test database
+        id: testdb
+        if: inputs.test-database
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+        run: |
+          node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" sweep
+          node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" create
+
       - name: Tests
         working-directory: repo
         run: |
@@ -111,3 +135,11 @@ jobs:
             exit 0
           fi
           pnpm test
+
+      - name: Delete the test database
+        if: always() && steps.testdb.outputs.branch != ''
+        env:
+          NEON_API_KEY: ${{ secrets.NEON_CI_API_KEY }}
+          NEON_PROJECT_ID: ${{ vars.NEON_CI_PROJECT_ID }}
+          BRANCH: ${{ steps.testdb.outputs.branch }}
+        run: node "${{ steps.self.outputs.scripts }}/scripts/neonTestBranch.mjs" delete "$BRANCH"
