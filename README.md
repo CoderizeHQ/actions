@@ -238,7 +238,11 @@ same unsigned call. Each refused role is checked to exist (`iam:GetRole` as the 
 that isn't there too. A site role that isn't made yet (a record merged before the apply that makes its roles) is a
 warning, shown as "not made yet": nobody can assume a role that doesn't exist, and failing on it blocked every platform
 PR until that apply ran. A missing `coderizehq-infra-deploy`, or every role of one kind missing in its account (what a
-wrong role name here would look like), still fails. `plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
+wrong role name here would look like), still fails; so the first role of a kind in an account, from a record not yet
+applied, still blocks until its apply, which is the price of that guard. Only IAM's NoSuchEntity counts as missing:
+any other `GetRole` error fails the job.
+
+`plan`: per root, as the live account's `coderizehq-infra-plan` for the state (profile
 `state`) and the root's own account's for its resources (profile `account`), `tofu plan -lock=false`. A root whose
 provider needs a token the caller didn't pass (Cloudflare, GitHub) is skipped and says so. `comment`: one PR comment
 with every plan, updated on each push.
