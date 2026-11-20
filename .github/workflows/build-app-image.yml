@@ -117,14 +117,26 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
 
       # One layer at /app, owned by root and read by the image's `node` user (1000), so the app can't change its own
-      # code. Sorted, with fixed times, so the same files make the same layer.
+      # code. Sorted, with fixed times, so the same files make the same layer. The rename's S flag keeps it off symlink
+      # targets: pnpm's node_modules/<pkg> links point at `.pnpm/...`, which `^\.` would turn into `apppnpm/...`, and
+      # every package would be missing at run time (2026-11-20, mrleejunkcarbuyer-api's first deploy). The layer is
+      # then unpacked once to check that no link inside it is broken.
       - name: Assemble the image (linux/arm64)
         env:
           ENTRY: ${{ inputs.entry }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
         run: |
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='@0' \
-            -C "$RUNNER_TEMP/app" --transform 's,^\.,app,' -cf "$RUNNER_TEMP/layer.tar" .
+            -C "$RUNNER_TEMP/app" --transform 's,^\.,app,S' -cf "$RUNNER_TEMP/layer.tar" .
+          mkdir "$RUNNER_TEMP/layer-check"
+          tar -xf "$RUNNER_TEMP/layer.tar" -C "$RUNNER_TEMP/layer-check"
+          broken=$(find "$RUNNER_TEMP/layer-check" -xtype l -printf '%P -> %l\n')
+          if [ -n "$broken" ]; then
+            echo "::error::the image layer has broken links:"
+            echo "$broken" | head -20
+            exit 1
+          fi
+          rm -rf "$RUNNER_TEMP/layer-check"
           crane mutate "$BASE_IMAGE" --platform linux/arm64 \
             --append "$RUNNER_TEMP/layer.tar" \
             --workdir /app --user 1000:1000 \
