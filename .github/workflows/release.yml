@@ -3,6 +3,9 @@ name: release
 # Each site's release.yml calls this for a version tag (a merged release PR) and for the weekly dependency run on main:
 #   uses: CoderizeHQ/actions/.github/workflows/release.yml@v1
 #   with: { site: sbmcdn-com }
+# A site in an app repo (platform README "Sites in an app repo") also names its deployment environment,
+# live-<site>, so the sites sharing that repo keep separate deployment records:
+#   with: { site: admin-example-com, deployment: live-admin-example-com }
 # Only the site name comes in. The live bucket is coderizehq-live-<site> by contract; the distribution is the one whose
 # Comment is exactly the site name (platform sets it, and the role may ListDistributions), and the domain is that
 # distribution's apex alias. So nothing about the site is kept in its own repo.
@@ -25,6 +28,10 @@ on:
         description: Refuse a publish that deletes more than this share of live's files (0 to 1)
         type: string
         default: '0.25'
+      deployment:
+        description: The GitHub deployment environment the release is recorded under, live or live-<site>
+        type: string
+        default: live
 
 permissions:
   contents: read
@@ -135,6 +142,7 @@ jobs:
         id: publish
         env:
           SITE: ${{ inputs.site }}
+          DEPLOYMENT: ${{ inputs.deployment }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
           REPO: ${{ github.repository }}
           COMMIT: ${{ github.sha }}

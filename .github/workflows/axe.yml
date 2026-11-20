@@ -6,14 +6,19 @@ name: axe
 # Builds the site, serves the build the way live does, and runs axe on every built page in light and dark color
 # schemes, after the network is idle, against WCAG 2.2 AA including target size. It fails on any violation, a page
 # that doesn't answer 200, and fewer pages than expected: fewer than min-pages, or a sitemap URL with no built page.
-# No AWS and no secrets: it runs the PR's code.
+# No AWS and no secrets: it runs the PR's code. For a site in an app repo, platform's app-checks.yml passes the site's
+# package, and only that package is built and scanned.
 on:
   workflow_call:
     inputs:
       build-dir:
-        description: Where the build writes the site
+        description: Where the build writes the site (inside the package, when there is one)
         type: string
         default: dist
+      package:
+        description: The site's pnpm package as a path (./apps/web), for a site in an app repo; empty for the repo root
+        type: string
+        default: ''
       min-pages:
         description: The fewest pages the build may have
         type: number
@@ -62,11 +67,29 @@ jobs:
           install: false
           working-directory: site
 
-      - name: Build the site
+      - run: pnpm install --frozen-lockfile
         working-directory: site
+
+      - name: Build the site
+        id: build
+        working-directory: site
+        env:
+          PACKAGE: ${{ inputs.package }}
+          BUILD_DIR: ${{ inputs.build-dir }}
         run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
+          # No package: the repo root builds the site (a site repo). A package (a site in an app repo, platform README
+          # "Sites in an app repo"): a path to exactly one pnpm package, built alone, as build-app-image builds an app;
+          # build-dir is then inside it.
+          if [ -z "$PACKAGE" ]; then
+            pnpm run build
+            echo "dir=$BUILD_DIR" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$PACKAGE" =~ ^\./[A-Za-z0-9_-][A-Za-z0-9_./-]*$ && "$PACKAGE" != *..* && "$PACKAGE" != */ ]] || { echo "::error::package is a path to one pnpm package in the repo (./apps/web)"; exit 1; }
+          matches=$(pnpm --filter "$PACKAGE" list --depth -1 --json | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).length))')
+          [ "$matches" = 1 ] || { echo "::error::package $PACKAGE matches $matches packages, not one"; exit 1; }
+          pnpm --filter "$PACKAGE" run build
+          echo "dir=${PACKAGE#./}/$BUILD_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Install the scanner and Chromium
         working-directory: actions
@@ -83,6 +106,6 @@ jobs:
 
       - name: Scan every page
         env:
-          BUILD_DIR: site/${{ inputs.build-dir }}
+          BUILD_DIR: site/${{ steps.build.outputs.dir }}
           MIN_PAGES: ${{ inputs.min-pages }}
         run: node actions/scripts/axeScan.mjs

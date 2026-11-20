@@ -219,6 +219,16 @@ export async function checkLiveSite({ domain, files, fetchImpl = fetch, waitMs =
   return problems
 }
 
+/**
+ * The GitHub deployment environment a release is recorded under: `live`, or `live-<site>` for a site that shares its
+ * repo with other sites (platform README "Sites in an app repo"), which only that site's own name can be.
+ */
+export function deploymentEnvironment(site, value = 'live') {
+  const env = value || 'live'
+  if (env !== 'live' && env !== `live-${site}`) throw new Error(`deployment must be live or live-${site} (got ${env})`)
+  return env
+}
+
 /** The deployment record's payload: what was published, why it was allowed, and from which build. */
 export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl }) {
   return {
@@ -263,6 +273,7 @@ async function verifyMain() {
 async function publishMain() {
   const env = process.env
   const site = checkSite(env.SITE)
+  const environment = deploymentEnvironment(site, env.DEPLOYMENT)
   const commit = checkSha(env.COMMIT)
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const { REPO: repo, GH_TOKEN: token } = env
@@ -296,7 +307,7 @@ async function publishMain() {
     method: 'POST',
     body: {
       ref: commit,
-      environment: 'live',
+      environment,
       auto_merge: false,
       required_contexts: [],
       production_environment: true,
