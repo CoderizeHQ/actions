@@ -42,6 +42,7 @@ import {
   storedKey,
 } from './lib/build.mjs'
 import { hashes, plainEtag } from './lib/files.mjs'
+import { notClosedToEveryCrawler } from './lib/robots.mjs'
 import { gh } from './lib/github.mjs'
 import { checkClaims, requestClaims } from './lib/oidc.mjs'
 import { output, runIfMain, summary } from './lib/report.mjs'
@@ -208,7 +209,7 @@ export function robotsProblems(text, { noindex = false } = {}) {
     }
   }
   if (noindex) {
-    if (!blocked.has('*')) problems.push('robots.txt must disallow every crawler from the whole site: the site is served noindex (its record says indexed: false)')
+    for (const p of notClosedToEveryCrawler(text)) problems.push(`${p}: it must disallow every crawler from the whole site, since the site is served noindex (its record says indexed: false)`)
     if (sitemapsIn(text).length) problems.push('robots.txt names a Sitemap, but the site is served noindex (its record says indexed: false)')
     return problems
   }
@@ -253,7 +254,7 @@ export async function checkLiveSite({ domain, site, host = domain, files, fetchI
 
   const text = robots.body.toString('utf8')
   // Platform's live noindex headers policy, given only to a record with "indexed": false (step 5 above).
-  const noindex = /(^|[\s,])noindex($|[\s,])/i.test(home.headers?.get?.('x-robots-tag') ?? '')
+  const noindex = /(^|[\s,])(noindex|none)($|[\s,])/i.test(home.headers?.get?.('x-robots-tag') ?? '')
   problems.push(...robotsProblems(text, { noindex }))
   if (noindex) return problems
   for (const url of sitemapsIn(text)) {

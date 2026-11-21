@@ -19,6 +19,8 @@
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
+import { notClosedToEveryCrawler } from './lib/robots.mjs'
+
 import { walkBuild } from './lib/files.mjs'
 import { runIfMain, summary } from './lib/report.mjs'
 
@@ -145,8 +147,8 @@ export function checkBuild({ files, read, siteUrl, indexed = true }) {
   else {
     const robots = parseRobots(read('robots.txt'))
     if (!indexed) {
-      // Noindex mode: shut every crawler out, and no sitemap anywhere.
-      if (!robots.blocksAll) problems.push('robots.txt must disallow every crawler: the site record says indexed: false')
+      // Noindex mode: shut every crawler out (every group, not just *), and no sitemap anywhere.
+      for (const p of notClosedToEveryCrawler(read('robots.txt'))) problems.push(`${p}: it must disallow every crawler, since the site record says indexed: false`)
       if (robots.sitemaps.length) problems.push('robots.txt names a sitemap, but the site record says indexed: false (a noindex site has no sitemap)')
     } else {
       if (robots.blocksAll) problems.push('robots.txt disallows / for every crawler (a preview robots.txt must not ship)')

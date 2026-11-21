@@ -145,6 +145,8 @@ test('with noindex, robots.txt must shut every crawler out and name no Sitemap',
   assert.match(robotsProblems(robots, { noindex: true }).join(' '), /must disallow every crawler/)
   assert.match(robotsProblems('User-agent: *\nDisallow: /\nSitemap: https://x/s.xml', { noindex: true }).join(' '), /names a Sitemap/)
   assert.match(robotsProblems('User-agent: GPTBot\nDisallow: /\n', { noindex: true }).join(' '), /must disallow every crawler/)
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\nUser-agent: Googlebot\nAllow: /\n', { noindex: true }).join(' '), /group for googlebot doesn't disallow/)
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\nAllow: /e/\n', { noindex: true }).join(' '), /allows \/e\//)
   // Indexed, the default, still refuses it.
   assert.match(robotsProblems('User-agent: *\nDisallow: /\n').join(' '), /disallows every crawler/)
 })

@@ -108,6 +108,9 @@ test('noindex mode: an indexable robots.txt, a sitemap or a missing robots.txt f
   const problems = (o) => noindexSite(o).problems.join('\n')
   assert.match(problems({ 'robots.txt': 'User-agent: *\nAllow: /\n' }), /must disallow every crawler/)
   assert.match(problems({ 'robots.txt': 'User-agent: googlebot\nDisallow: /\n' }), /must disallow every crawler/)
+  // A crawler follows its own group only, so one bot's group or an Allow line opens the site to it.
+  assert.match(problems({ 'robots.txt': 'User-agent: *\nDisallow: /\n\nUser-agent: Googlebot\nAllow: /\n' }), /group for googlebot doesn't disallow \//)
+  assert.match(problems({ 'robots.txt': 'User-agent: *\nDisallow: /\nAllow: /e/\n' }), /group for \* allows \/e\//)
   assert.match(problems({ 'robots.txt': 'User-agent: *\nDisallow: /\nSitemap: https://app.x.com/sitemap.xml\n' }), /names a sitemap/)
   assert.match(problems({ 'sitemap.xml': '<urlset><url><loc>https://app.x.com/</loc></url></urlset>' }), /sitemap\.xml is in the build/)
   assert.match(problems({ 'robots.txt': undefined }), /robots\.txt is missing/)
