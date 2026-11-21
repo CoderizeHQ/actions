@@ -15,7 +15,10 @@ name: release
 # release-please-- PR, release files only, approved by James at its final commit; a run on main must be a gap of
 # Renovate's passing lockfile-only minor and patch PRs since the last version release, or a go-live release (the
 # repository_dispatch `go-live-release` from the platform App, naming this site), which `publish` then refuses unless
-# the site's distribution serves no name yet (before its alias move); anything else is refused.
+# the site's distribution serves no name yet (before its alias move), or a content rebuild (the repository_dispatch
+# `content-rebuild` from the release App, as platform's content check, naming this site; scripts/lib/rebuild.mjs): the
+# commit live runs now, which verify finds and re-checks itself, published from the rebuild the same run's
+# deploy-preview job stored, and only to a distribution already serving the site; anything else is refused.
 # `publish` then runs in the release environment as coderizehq-live-publish-<site> (its ARN comes from `site`), which
 # trusts only this file at v1 or v1.*: it publishes the build deploy-preview stored for that exact commit, checks it
 # on live, and records a GitHub deployment. IAM only lets it copy builds CI stored from main; that the build is the
@@ -48,9 +51,15 @@ jobs:
       checks: read
       statuses: read
       actions: read
+      # A content rebuild reads which commit is live from the deployment records (within the caller's deployments: write).
+      deployments: read
     outputs:
       publish: ${{ steps.verify.outputs.publish }}
       kind: ${{ steps.verify.outputs.kind }}
+      commit: ${{ steps.verify.outputs.commit }}
+      rebuild-basis: ${{ steps.verify.outputs.rebuild-basis }}
+      rebuild-tag: ${{ steps.verify.outputs.rebuild-tag }}
+      content-sha256: ${{ steps.verify.outputs.content-sha256 }}
       release-pr: ${{ steps.verify.outputs.release-pr }}
       approver: ${{ steps.verify.outputs.approver }}
       dependency-prs: ${{ steps.verify.outputs.dependency-prs }}
@@ -93,7 +102,8 @@ jobs:
           working-directory: actions
 
       # The event's fields decide a go-live release (platform's apply, as the platform App, for a site whose new
-      # distribution has no aliases yet); they come in as environment only.
+      # distribution has no aliases yet) and a content rebuild (platform's content check, as the release App); they come
+      # in as environment only.
       - name: Verify the release
         id: verify
         env:
@@ -106,6 +116,8 @@ jobs:
           DISPATCH: ${{ github.event.action }}
           SENDER: ${{ github.event.sender.login }}
           PAYLOAD_SITE: ${{ github.event.client_payload.site }}
+          PAYLOAD_CONTENT: ${{ github.event.client_payload.content_sha256 }}
+          DEPLOYMENT: ${{ inputs.deployment }}
         run: node actions/scripts/release.mjs verify
 
   publish:
@@ -155,7 +167,13 @@ jobs:
           DEPLOYMENT: ${{ inputs.deployment }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
           REPO: ${{ github.repository }}
-          COMMIT: ${{ github.sha }}
+          # verify's commit: the run's own, except a content rebuild's (the live commit, stored as this run's rebuild).
+          COMMIT: ${{ needs.verify.outputs.commit }}
+          RUN_SHA: ${{ github.sha }}
+          REBUILD_RUN: ${{ needs.verify.outputs.kind == 'content' && github.run_id || '' }}
+          REBUILD_BASIS: ${{ needs.verify.outputs.rebuild-basis }}
+          REBUILD_TAG: ${{ needs.verify.outputs.rebuild-tag }}
+          CONTENT_SHA256: ${{ needs.verify.outputs.content-sha256 }}
           WORKFLOW_SHA: ${{ needs.verify.outputs.workflow-sha }}
           KIND: ${{ needs.verify.outputs.kind }}
           RELEASE_PR: ${{ needs.verify.outputs.release-pr }}
@@ -221,7 +239,7 @@ jobs:
           SITE: ${{ inputs.site }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ needs.verify.outputs.commit || github.sha }}
           RESULTS: verify=${{ needs.verify.result }},publish=${{ needs.publish.result }}
           KIND: ${{ needs.verify.outputs.kind }}
           RELEASE_PR: ${{ needs.verify.outputs.release-pr }}

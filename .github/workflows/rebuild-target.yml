@@ -1,0 +1,94 @@
+name: rebuild-target
+
+# The first job of a content rebuild (platform's `rebuild` record field; scripts/lib/rebuild.mjs). A site whose record
+# opts in gets a platform-written rebuild workflow, run only by the repository_dispatch `content-rebuild` that
+# platform's content check sends, as the release App, when what the site's build fetches has changed:
+#   target:  uses: CoderizeHQ/actions/.github/workflows/rebuild-target.yml@v1    with: { site, deployment }
+#   build:   uses: CoderizeHQ/actions/.github/workflows/deploy-preview.yml@v1    with: { site, rebuild-commit: <target's commit> }
+#   release: uses: CoderizeHQ/actions/.github/workflows/release.yml@v1           with: { site, deployment }
+# This one has no AWS access and runs nothing from the site. Through GitHub's API it checks the dispatch (main, the
+# release App, this site, a content hash) and finds the commit to rebuild: the one live runs now (the newest
+# successful deployment to `deployment`), and only if it still passes the rules that let it go live (a version
+# release's release-check, or a dependency-only release's gap). Its `commit` output is what deploy-preview builds;
+# release.yml then finds the target again on its own and publishes only that.
+on:
+  workflow_call:
+    inputs:
+      site:
+        description: The site's name (its domain with dots as hyphens, as in platform/sites/<site>.json)
+        type: string
+        required: true
+      deployment:
+        description: The GitHub deployment environment the site's releases are recorded under, live or live-<site>
+        type: string
+        default: live
+    outputs:
+      commit:
+        description: The commit to rebuild, the one live runs now
+        value: ${{ jobs.target.outputs.commit }}
+
+permissions:
+  contents: read
+
+jobs:
+  target:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+      actions: read
+      deployments: read
+    outputs:
+      commit: ${{ steps.target.outputs.commit }}
+    steps:
+      - name: Check the site name
+        env:
+          SITE: ${{ inputs.site }}
+        run: |
+          [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
+
+      # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
+      # scripts from that same commit.
+      - name: Find this workflow's commit
+        id: self
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKFLOW: CoderizeHQ/actions/.github/workflows/rebuild-target.yml
+        run: |
+          shas=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --jq '[.referenced_workflows[] | select(.path | startswith(env.WORKFLOW + "@")) | .sha] | unique | .[]')
+          [ "$(wc -w <<<"$shas")" = 1 ] || { echo "::error::can't tell which commit of rebuild-target.yml this run uses"; exit 1; }
+          echo "sha=$shas" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: CoderizeHQ/actions
+          ref: ${{ steps.self.outputs.sha }}
+          path: actions
+          persist-credentials: false
+
+      # The target step needs no packages: it uses Node's own fetch.
+      - name: Setup Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@26
+          install: false
+          working-directory: actions
+
+      # The event's fields come in as environment only.
+      - name: Find the commit to rebuild
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          SITE: ${{ inputs.site }}
+          DEPLOYMENT: ${{ inputs.deployment }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH: ${{ github.event.action }}
+          SENDER: ${{ github.event.sender.login }}
+          PAYLOAD_SITE: ${{ github.event.client_payload.site }}
+          PAYLOAD_CONTENT: ${{ github.event.client_payload.content_sha256 }}
+        run: node actions/scripts/rebuild.mjs target

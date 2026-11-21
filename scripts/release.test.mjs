@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { manifestKey, PREVIEW_BUCKET, storedKey } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
 import { memoryStore } from './lib/memoryStore.mjs'
-import { checkLiveSite, deploymentEnvironment, deploymentPayload, describe, findLive, goLiveRefusal, isSiteHost, KINDS, publishLive, robotsProblems, verify } from './release.mjs'
+import { checkLiveSite, contentRefusal, deploymentEnvironment, deploymentPayload, describe, findLive, goLiveRefusal, isSiteHost, KINDS, publishLive, robotsProblems, verify } from './release.mjs'
 
 const site = 'sbmcdn-com'
 const domain = 'sbmcdn.com'
@@ -274,4 +274,79 @@ test("verify: a go-live dispatch's sender and site are shown tamed, so they can'
   }
   assert.match(r.reasons[1], /names a-com\?\?\?\?injectedz+, not sbmcdn-com$/)
   assert.ok(r.reasons[1].length < 120)
+})
+
+// platform's content check: a content-rebuild dispatch, as the release App, for a live site whose build-time content
+// changed. verify finds the live commit itself (lib/rebuild.mjs, stubbed here) and publish takes this run's rebuild.
+const content = 'c'.repeat(64)
+const rebuildDispatch = { token: 't', repo, ref: 'refs/heads/main', sha: '9'.repeat(40), event: 'repository_dispatch', dispatch: 'content-rebuild', sender: 'coderizehq-release[bot]', site, payloadSite: site, payloadContent: content }
+const never = { checkRelease: async () => assert.fail('no release check'), checkDependencyRun: async () => assert.fail('no dependency check') }
+
+test("verify: a content rebuild publishes the live commit findTarget re-checked, never the run's (main's head)", async () => {
+  const environments = []
+  const findTarget = async ({ environment }) => (environments.push(environment), { ok: true, sha: commit, basis: 'version', tag: 'v1.4.0', pr: 12, approver: 'GilbertJames', prs: [] })
+  const r = await verify({ ...rebuildDispatch, environment: 'live', checks: { ...never, findTarget } })
+  assert.deepEqual(r, {
+    publish: true,
+    kind: 'content',
+    commit,
+    pr: 12,
+    approver: 'GilbertJames',
+    prs: [],
+    rebuild: { basis: 'version', tag: 'v1.4.0', contentSha256: content },
+    reasons: [],
+  })
+  assert.deepEqual(environments, ['live'])
+})
+
+test('verify: a content rebuild that findTarget refuses, or a bad dispatch, publishes nothing and is never a dependency run', async () => {
+  const refuse = async () => ({ ok: false, reasons: ['live 1111111 is the go-live release'] })
+  assert.deepEqual(await verify({ ...rebuildDispatch, checks: { ...never, findTarget: refuse } }), { publish: false, reasons: ['live 1111111 is the go-live release'] })
+  const noLookup = async () => assert.fail('no lookup for a bad dispatch')
+  for (const bad of [{ sender: 'coderizehq-platform[bot]' }, { payloadSite: 'other-com' }, { payloadContent: 'nope' }, { ref: 'refs/tags/v1.4.0' }]) {
+    const r = await verify({ ...rebuildDispatch, ...bad, checks: { ...never, findTarget: noLookup } })
+    assert.equal(r.publish, false, JSON.stringify(bad))
+  }
+  // Another site's deployments are never read.
+  await assert.rejects(verify({ ...rebuildDispatch, environment: 'live-other-com', checks: { ...never, findTarget: noLookup } }), /live or live-sbmcdn-com/)
+})
+
+test("publish: a content rebuild copies this run's stored rebuild, never the commit's first build", async () => {
+  const store = memoryStore()
+  storedBuild(store, { 'index.html': 'first build', 'robots.txt': robots })
+  const run = '4242'
+  const rebuilt = { 'index.html': '<h1>new events</h1>', 'events/new/index.html': '<h1>new</h1>', 'robots.txt': robots }
+  const manifest = { version: 1, site, repo, commit, workflow_sha: '2'.repeat(40), lockfile_sha256: '3'.repeat(64), created: 'x', rebuild: { run, content_sha256: content }, files: {} }
+  for (const [name, body] of Object.entries(rebuilt)) {
+    store.seed(PREVIEW_BUCKET, storedKey(site, commit, name, run), body)
+    manifest.files[name] = { size: Buffer.byteLength(body), sha256: hashes(Buffer.from(body)).sha256 }
+  }
+  store.seed(PREVIEW_BUCKET, manifestKey(site, commit, run), JSON.stringify(manifest))
+  await publishLive({ store, site, repo, commit, rebuild: run, distributionId: 'E1ABCDEF2GHIJ', ...quiet })
+  assert.equal((await store.get(live, 'index.html')).body.toString(), '<h1>new events</h1>')
+  for (const c of store.calls.filter((x) => x[0] === 'copy')) assert.match(c[1], new RegExp(`^${PREVIEW_BUCKET}/_builds/${site}/${commit}/rebuilds/${run}/files/`))
+  // The commit's first build's manifest isn't a rebuild's, and another run's rebuild isn't this one's.
+  await assert.rejects(publishLive({ store, site, repo, commit, rebuild: '4243', distributionId: 'E1ABCDEF2GHIJ', waitMs: 0, pollMs: 0, ...quiet }), /no stored build/)
+  store.seed(PREVIEW_BUCKET, manifestKey(site, commit, '4244'), JSON.stringify(manifest))
+  await assert.rejects(publishLive({ store, site, repo, commit, rebuild: '4244', distributionId: 'E1ABCDEF2GHIJ', ...quiet }), /isn't content rebuild 4244's/)
+})
+
+test('publish: a content rebuild goes only to a site live on its domain, and only while live still runs its commit', () => {
+  const at = { distributionId: 'ELIVE', domain, site, commit, liveSha: commit }
+  assert.equal(contentRefusal('content', at), null)
+  assert.match(contentRefusal('content', { ...at, domain: null, distributionId: 'EMOVE' }), /EMOVE serves no name yet \(an alias move under way\)/)
+  assert.match(contentRefusal('content', { ...at, liveSha: '8'.repeat(40) }), /live moved from 1111111 to 8888888 since this content rebuild found its target/)
+  assert.match(contentRefusal('content', { ...at, liveSha: null }), /to nothing/)
+  // Every other kind is someone else's check.
+  assert.equal(contentRefusal('version', { ...at, liveSha: '8'.repeat(40) }), null)
+})
+
+test("a content rebuild's deployment names its run, what it rebuilt and the content hash; other kinds have no rebuild field", () => {
+  const rebuild = { run: '4242', basis: 'version', tag: 'v1.4.0', contentSha256: content }
+  const p = deploymentPayload({ kind: 'content', commit, pr: 12, approver: 'GilbertJames', manifestSha256: 'f'.repeat(64), workflowSha: '2'.repeat(40), domain, runUrl: 'https://run', rebuild })
+  assert.equal(p.kind, 'content')
+  assert.deepEqual(p.rebuild, { run: '4242', basis: 'version', tag: 'v1.4.0', content_sha256: content })
+  assert.equal('rebuild' in deploymentPayload({ kind: 'version', commit, workflowSha: '2'.repeat(40), domain, runUrl: 'x' }), false)
+  assert.ok(KINDS.includes('content'))
+  assert.equal(describe({ kind: 'content', commit, rebuild }), 'content rebuild of v1.4.0 (1111111), content cccccccccccc')
 })

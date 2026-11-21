@@ -11,6 +11,12 @@ name: deploy-preview
 # Two jobs, so the site's own code never runs where AWS credentials exist: `build` runs pnpm install and build with
 # no role, and `deploy` only uploads what it built. The deploy role, coderizehq-preview-deploy-<site>, trusts only this
 # file at v1 or v1.*, from the site's repo on main; its ARN comes from `site`, never from an input.
+#
+# A content rebuild (platform's `rebuild` record field; scripts/lib/rebuild.mjs): the site's platform-written rebuild
+# workflow, run by the repository_dispatch content-rebuild on main, calls this with `rebuild-commit`, the commit live
+# runs now as rebuild-target.yml found it. Then `build` builds that commit instead of the run's, and `deploy` stores it
+# write-once under _builds/<site>/<commit>/rebuilds/<run id>/ for the same run's release job, and leaves the preview
+# alone (it shows main's head). Its deploy queue is its own, so a rebuild never replaces a push's waiting deploy.
 on:
   workflow_call:
     inputs:
@@ -30,6 +36,10 @@ on:
         description: Refuse a publish that deletes more than this share of the preview's files (0 to 1)
         type: string
         default: '0.25'
+      rebuild-commit:
+        description: A content rebuild's commit (rebuild-target.yml's output), from the site's rebuild workflow only; empty for every other run
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -47,8 +57,22 @@ jobs:
         run: |
           [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
 
+      # Only the content-rebuild dispatch may build anything but the run's own commit.
+      - name: Check the content rebuild
+        if: inputs.rebuild-commit != ''
+        env:
+          COMMIT: ${{ inputs.rebuild-commit }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH: ${{ github.event.action }}
+        run: |
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::rebuild-commit must be a 40-character commit SHA"; exit 1; }
+          [ "$EVENT" = repository_dispatch ] && [ "$DISPATCH" = content-rebuild ] && [ "$GITHUB_REF" = refs/heads/main ] || {
+            echo "::error::rebuild-commit is only for the repository_dispatch content-rebuild on main (got $EVENT $DISPATCH on $GITHUB_REF)"; exit 1;
+          }
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.rebuild-commit || github.sha }}
           persist-credentials: false
 
       # Before anything from the site runs, so the manifest's lockfile hash is the committed file's.
@@ -98,9 +122,10 @@ jobs:
   deploy:
     needs: build
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
-    # One queue per site: a running deploy is never cancelled, and of the waiting ones the newest wins.
+    # One queue per site: a running deploy is never cancelled, and of the waiting ones the newest wins. Content rebuilds
+    # queue apart: they write only their own rebuild folder, and must never replace a push's waiting deploy.
     concurrency:
-      group: deploy-preview-${{ inputs.site }}
+      group: deploy-preview-${{ inputs.site }}${{ inputs.rebuild-commit != '' && '-rebuild' || '' }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -160,7 +185,10 @@ jobs:
         env:
           SITE: ${{ inputs.site }}
           REPO: ${{ github.repository }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ inputs.rebuild-commit || github.sha }}
+          RUN_SHA: ${{ github.sha }}
+          REBUILD_RUN: ${{ inputs.rebuild-commit != '' && github.run_id || '' }}
+          CONTENT_SHA256: ${{ inputs.rebuild-commit != '' && github.event.client_payload.content_sha256 || '' }}
           BUILD_DIR: ${{ runner.temp }}/site-build
           LOCKFILE_SHA256: ${{ needs.build.outputs.lockfile-sha256 }}
           WORKFLOW_SHA: ${{ steps.self.outputs.sha }}
@@ -220,7 +248,7 @@ jobs:
           SITE: ${{ inputs.site }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref }}
-          COMMIT: ${{ github.sha }}
+          COMMIT: ${{ inputs.rebuild-commit || github.sha }}
           RESULTS: build=${{ needs.build.result }},deploy=${{ needs.deploy.result }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: node actions/scripts/notify.mjs

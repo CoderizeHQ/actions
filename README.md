@@ -54,8 +54,9 @@ required workflow that isn't there blocks every PR it covers.
 | `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
-| `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
-| `release.yml` | site, version tag or weekly on main | `site`, `max-delete-share` (`0.25`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
+| `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild workflow only) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
+| `release.yml` | site, version tag or weekly on main; a site's rebuild workflow | `site`, `max-delete-share` (`0.25`), `deployment` (`live`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
+| `rebuild-target.yml` | a site's rebuild workflow (Content rebuilds) | `site`, `deployment` (`live`); output `commit` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: read` | None: no AWS, no writes. Finds the commit a content rebuild builds |
 | `build-app-image.yml` | an app repo, every PR and push to main | `app`, `package`, `entry` | `contents: read`, `actions: read`, `id-token: write` | Builds the app's linux/arm64 image without Docker (crane on a pinned Node base); on main, `coderizehq-app-build-<app>` pushes it to ECR tagged with the commit. That role trusts only this file at `v1`/`v1.*`, from the app repo's main (platform `docs/apps.md`) |
 | `deploy-app.yml` | an app repo, version tag or main | `app` | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-app-deploy-<app>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; it may only run the app's own deploy document on the app server, read and tag its own ECR repository, and find the server |
 | `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
@@ -142,6 +143,12 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
    - invalidates `/sites/<site>/*` on the preview distribution only when something changed, and waits for it.
 3. `notify` (only when `build` or `deploy` failed): emails ops@coderize.dev (see Notifications).
 
+With `rebuild-commit` (a content rebuild, below), `build` first checks the run is the `content-rebuild` dispatch on main
+and the input a 40-character SHA, then checks out and builds that commit instead of the run's; `deploy` stores it at
+`_builds/<site>/<commit>/rebuilds/<run id>/` (the same write-once rules, its manifest naming the run and the content
+hash), queued apart from push deploys (`deploy-preview-<site>-rebuild`), and leaves the preview alone. The OIDC token
+still names the run's own commit, which the deploy role trusts as before.
+
 ### release
 
 1. `verify` (no AWS), through GitHub's API:
@@ -168,6 +175,11 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
      domain. The domain gets it only through James's alias move (platform's `alias-move.yml`), which checks that
      build first; from then on the site's releases are version releases as usual. A dispatch
      from anyone else, or naming another site, is refused, never taken for a dependency run;
+   - `refs/heads/main` from the `repository_dispatch` `content-rebuild` (a content rebuild, below), sent by the release
+     App (`coderizehq-release[bot]`, the only sender accepted) with `client_payload.site` naming the site and
+     `client_payload.content_sha256`: verify finds the commit live runs now itself (`scripts/lib/rebuild.mjs`), and
+     publish takes that commit's rebuild stored by the same run, never the run's own commit (main's head). Refused
+     like the go-live release when anything doesn't match, and never taken for a dependency run;
    - anything else is refused.
 2. `publish` (the `release` environment, the live role; one queue per site):
    - finds the live distribution: the one whose Comment is exactly `<site>` (platform sets it), and the domain from
@@ -188,6 +200,33 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
 3. `notify`: emails ops@coderize.dev when `publish` succeeded, or when `verify` or `publish` failed (a refusal
    included, with its reasons). Nothing is sent when there was nothing to publish, or for a run on a ref release can
    never take (neither a version tag nor main).
+
+### Content rebuilds
+
+For a live site whose build bakes in content from an API (event pages, testimonials, prices), so that the content
+reaching live doesn't wait for a code release. Platform's record field `rebuild` opts a site in, and platform's content
+check (its `release-bootstrap.yml`, as the release App) hashes the record's content URLs each hour; when the hash
+changed it sends the site's repo the `repository_dispatch` `content-rebuild` with the site and the hash. The site's
+platform-written rebuild workflow (`rebuild.yml`, or `rebuild-<site>.yml` in an app repo) runs three jobs in one run:
+
+1. `rebuild-target.yml`: checks the dispatch and finds the **commit live runs now**, the newest successful deployment
+   to `live` (or `live-<site>`), and only if it still passes the rules that let it go live: a version tag on it passes
+   `release-check`, or it is a dependency-only release on top of the last version (`dependencyCheck.mjs`). Nothing
+   live, a go-live release (before the first version release), or anything else is refused. So a content rebuild
+   never ships code: merges not yet released stay unreleased, and a rolled-back site is rebuilt at the version it
+   was rolled back to.
+2. `deploy-preview.yml` with `rebuild-commit`: builds that commit with no credentials and stores it as this run's
+   rebuild (above). The commit's first build is never touched.
+3. `release.yml`: verify finds the target again on its own and must agree; publish copies this run's stored rebuild
+   to the distribution that already serves the site, refuses one with no aliases yet (an alias move under way), and
+   asks again right before it writes whether live still runs that commit (a release published meanwhile wins: the
+   rebuild is refused, and platform's next check rebuilds the new commit if the content still differs). It records a
+   deployment of kind `content` whose payload adds `rebuild` (`run`, `basis`, `tag`, `content_sha256`), shares the
+   per-site release queue, keeps the mass-delete guard, runs every live check and emails ops@ like any release.
+
+No new trust: every AWS call is made by the same roles as before (the preview role for `deploy-preview.yml` on main,
+the live role for `release.yml` in the `release` environment on main), and both read and write only
+`_builds/<site>/*` and the site's own bucket, as they always did.
 
 ### Notifications
 

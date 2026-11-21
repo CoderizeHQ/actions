@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 
-import { DELETE_FLOOR, deleteGuard, liveRoleArn, makeManifest, planSync, previewRoleArn, readManifest, storedKey } from './build.mjs'
+import { checkRun, DELETE_FLOOR, deleteGuard, liveRoleArn, makeManifest, manifestKey, planSync, previewRoleArn, readManifest, rebuildPrefix, storedKey, storedPrefix } from './build.mjs'
 import { CACHE_IMMUTABLE, CACHE_SHORT, cacheControlFor, checkPath, contentTypeFor, walkBuild } from './files.mjs'
 import { checkClaims, decodeClaims } from './oidc.mjs'
 
@@ -125,4 +125,27 @@ test('OIDC claims must name this workflow, its commit, the repo and the commit',
   assert.equal(checkClaims(claims, { ...want, workflow: 'release.yml' }).length, 1)
   assert.equal(checkClaims({ ...claims, job_workflow_sha: 'f'.repeat(40) }, want).length, 1)
   assert.equal(checkClaims({ ...claims, job_workflow_ref: 'evil/actions/.github/workflows/deploy-preview.yml@v1' }, want).length, 1)
+})
+
+test("a content rebuild is stored in its own folder under the commit's, named for its run", () => {
+  assert.equal(storedKey('sbmcdn-com', SHA, 'index.html', '4242'), `_builds/sbmcdn-com/${SHA}/rebuilds/4242/files/index.html`)
+  assert.equal(manifestKey('sbmcdn-com', SHA, '4242'), `_builds/sbmcdn-com/${SHA}/rebuilds/4242/manifest.json`)
+  assert.equal(rebuildPrefix('sbmcdn-com', SHA, 4242), `_builds/sbmcdn-com/${SHA}/rebuilds/4242/`)
+  // Without a run, the commit's own build, as always.
+  assert.equal(manifestKey('sbmcdn-com', SHA), `_builds/sbmcdn-com/${SHA}/manifest.json`)
+  assert.equal(storedPrefix('sbmcdn-com', SHA, null), `_builds/sbmcdn-com/${SHA}/`)
+  for (const run of ['0', '-1', '12a', '../x', '1'.repeat(21), '']) assert.throws(() => checkRun(run), run)
+  assert.equal(checkRun(19489012345), '19489012345')
+})
+
+test("a content rebuild's manifest says which rebuild it is, and only that rebuild's reader takes it", () => {
+  const base = { site: 'sbmcdn-com', repo: 'CoderizeHQ/gate-test-web', commit: SHA, workflowSha: 'b'.repeat(40), lockfileSha256: 'c'.repeat(64), created: 'x', files: [{ path: 'index.html', size: 4, sha256: 'd'.repeat(64) }] }
+  const m = makeManifest({ ...base, rebuild: { run: '4242', contentSha256: 'e'.repeat(64) } })
+  assert.deepEqual(m.rebuild, { run: '4242', content_sha256: 'e'.repeat(64) })
+  assert.equal('rebuild' in makeManifest(base), false)
+  const who = { site: 'sbmcdn-com', repo: 'CoderizeHQ/gate-test-web', commit: SHA }
+  assert.equal(readManifest(m, { ...who, rebuild: '4242' }).length, 1)
+  assert.throws(() => readManifest(m, who), /is a content rebuild, not the commit's own build/)
+  assert.throws(() => readManifest(m, { ...who, rebuild: '4243' }), /isn't content rebuild 4243's/)
+  assert.throws(() => readManifest(makeManifest(base), { ...who, rebuild: '4242' }), /isn't content rebuild 4242's/)
 })
