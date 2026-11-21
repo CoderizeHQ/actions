@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/CoderizeHQ/actions/compare/v1.7.1...v1.8.0) (2026-11-21)
+
+
+### Features
+
+* rebuild a live site's released commit when its build-time content changes ([#50](https://github.com/CoderizeHQ/actions/issues/50)) ([330fe66](https://github.com/CoderizeHQ/actions/commit/330fe6600d379fd7a2db2b8cbb5608d1cdc09b94))
+
 ## [1.7.1](https://github.com/CoderizeHQ/actions/compare/v1.7.0...v1.7.1) (2026-11-21)
 
 
