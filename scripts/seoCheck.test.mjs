@@ -84,3 +84,47 @@ test('tags inside scripts, styles and comments are not read', () => {
   const p = parsePage('<title>A &amp; B</title><script>const s = "<link rel=canonical href=/x/>"</script><!-- <a href="/b/"> --><a href="/c">c</a>')
   assert.deepEqual(p, { title: 'A & B', canonicals: [], noindex: false, redirect: false, links: ['/c'] })
 })
+
+// A sign-in app whose platform record says "indexed": false: one SPA shell, shut out of search.
+function noindexSite(overrides = {}, opts = {}) {
+  const files = {
+    'index.html': page({ title: 'App', canonical: null, links: ['/login', '/e/abc#top'] }),
+    'robots.txt': '# not for search\nUser-agent: *\nDisallow: /\n',
+    ...overrides,
+  }
+  for (const [k, v] of Object.entries(files)) if (v === undefined) delete files[k]
+  return checkBuild({ files: new Set(Object.keys(files)), read: (f) => files[f] ?? '', indexed: false, ...opts })
+}
+
+test('noindex mode: robots.txt shutting every crawler out, no sitemap and no canonical pass', () => {
+  const r = noindexSite()
+  assert.deepEqual(r.problems, [])
+  assert.equal(r.pages, 1)
+  assert.equal(r.sitemapUrls, 0)
+  assert.deepEqual(noindexSite({}, { siteUrl: 'https://app.x.com' }).problems, [])
+})
+
+test('noindex mode: an indexable robots.txt, a sitemap or a missing robots.txt fails', () => {
+  const problems = (o) => noindexSite(o).problems.join('\n')
+  assert.match(problems({ 'robots.txt': 'User-agent: *\nAllow: /\n' }), /must disallow every crawler/)
+  assert.match(problems({ 'robots.txt': 'User-agent: googlebot\nDisallow: /\n' }), /must disallow every crawler/)
+  assert.match(problems({ 'robots.txt': 'User-agent: *\nDisallow: /\nSitemap: https://app.x.com/sitemap.xml\n' }), /names a sitemap/)
+  assert.match(problems({ 'sitemap.xml': '<urlset><url><loc>https://app.x.com/</loc></url></urlset>' }), /sitemap\.xml is in the build/)
+  assert.match(problems({ 'robots.txt': undefined }), /robots\.txt is missing/)
+})
+
+test('noindex mode still checks titles, any canonical and trailing-slash links', () => {
+  const problems = (o, opts) => noindexSite(o, opts).problems.join('\n')
+  assert.match(problems({ 'index.html': page({ title: '', canonical: null }) }), /\/ has no <title>/)
+  assert.match(problems({ 'a/index.html': page({ title: 'App', canonical: null }) }), /share the title "App"/)
+  assert.match(problems({ 'index.html': page({ title: 'App', canonical: '/relative' }) }), /not an absolute https URL/)
+  assert.match(problems({ 'index.html': page({ title: 'App', canonical: 'https://other.com/' }) }, { siteUrl: 'https://app.x.com' }), /not on https:\/\/app\.x\.com/)
+  assert.match(problems({ 'index.html': page({ title: 'App', canonical: null, links: ['/login/'] }) }), /has a trailing slash/)
+})
+
+test('indexed mode, the default, still fails a robots.txt that shuts every crawler out', () => {
+  const files = { 'index.html': page({ title: 'App', canonical: null }), 'robots.txt': 'User-agent: *\nDisallow: /\n' }
+  const r = checkBuild({ files: new Set(Object.keys(files)), read: (f) => files[f] })
+  assert.match(r.problems.join('\n'), /disallows \/ for every crawler/)
+  assert.match(r.problems.join('\n'), /names no sitemap/)
+})
