@@ -53,7 +53,7 @@ export function message(run) {
   const ref = clean(run.ref, 120)
   const commit = clean(run.commit, 40)
   const tag = ref.startsWith('refs/tags/') ? ref.slice('refs/tags/'.length) : null
-  const what = tag ?? (run.kind === 'go-live' ? '(go-live)' : run.workflow === 'release' ? 'weekly dependency run' : commit.slice(0, 7))
+  const what = tag ?? (run.kind === 'go-live' ? '(go-live)' : run.kind === 'content' ? `content rebuild of ${commit.slice(0, 7)}` : run.workflow === 'release' ? 'weekly dependency run' : commit.slice(0, 7))
 
   const subject = ok
     ? `[CoderizeHQ] ${run.workflow === 'release' ? 'released' : 'deployed preview'} ${site} ${what}`
@@ -74,6 +74,8 @@ export function message(run) {
     lines.push(`Release: dependency-only, Renovate PRs ${prs.map((n) => `#${n}`).join(', ') || 'none'}`)
   } else if (run.kind === 'go-live') {
     lines.push("Release: go-live, main's head on the new distribution before its alias move (platform's apply)")
+  } else if (run.kind === 'content') {
+    lines.push("Release: content rebuild, the commit live runs now built again because its content changed (platform's content check)")
   }
   if (run.reasons) lines.push(`Refused: ${clean(run.reasons, 1500)}`)
   lines.push(`Run:     ${clean(run.runUrl, 300)}`, '', `Sent by CoderizeHQ/actions ${run.workflow}.yml. Nobody reads replies.`)

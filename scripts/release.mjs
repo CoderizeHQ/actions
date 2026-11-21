@@ -7,6 +7,10 @@
 // - main, from the repository_dispatch `go-live-release` that platform's apply sends as the platform App for a site
 //   whose new distribution has no aliases yet (GO_LIVE below): its first publish, which publish refuses for a
 //   distribution serving any name, so it never lands on the site's domain before James's alias move;
+// - main, from the repository_dispatch `content-rebuild` that platform's content check sends as the release App
+//   (lib/rebuild.mjs): the commit live runs now, found and re-checked here, built again by the same run's
+//   deploy-preview job; publish then takes that run's stored rebuild, only for a distribution already serving the
+//   site, and only while live still runs that commit;
 // - anything else is refused.
 //
 // `node release.mjs publish` (the release environment, as coderizehq-live-publish-<site>) then:
@@ -26,6 +30,7 @@
 //    the release PR, the approver and the manifest hash) and marked successful or failed at the end.
 
 import {
+  checkRun,
   checkSha,
   checkSite,
   DEFAULT_MAX_DELETE_SHARE,
@@ -41,6 +46,7 @@ import {
 import { hashes, plainEtag } from './lib/files.mjs'
 import { gh } from './lib/github.mjs'
 import { checkClaims, requestClaims } from './lib/oidc.mjs'
+import { CONTENT_REBUILD, describeTarget, dispatchProblems, findTarget, liveDeployment } from './lib/rebuild.mjs'
 import { output, runIfMain, summary } from './lib/report.mjs'
 import { checkDependencyRun } from '../release-check/dependencyCheck.mjs'
 import { checkRelease } from '../release-check/releaseCheck.mjs'
@@ -64,7 +70,37 @@ export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platfo
  * @returns {Promise<{ publish: boolean, kind?: 'version' | 'dependency' | 'go-live', pr?: number | null, approver?: string | null,
  *   prs?: number[], reasons: string[] }>}
  */
-export async function verify({ token, repo, ref, sha, event, dispatch, sender, site, payloadSite, checks = { checkRelease, checkDependencyRun } }) {
+export async function verify({
+  token,
+  repo,
+  ref,
+  sha,
+  event,
+  dispatch,
+  sender,
+  site,
+  payloadSite,
+  payloadContent,
+  environment = 'live',
+  checks = { checkRelease, checkDependencyRun, findTarget },
+}) {
+  // A content rebuild: the commit live runs now, found again here, never trusting the build job's word for it.
+  if (event === 'repository_dispatch' && dispatch === CONTENT_REBUILD.action) {
+    const reasons = dispatchProblems({ ref, sender, site, payloadSite, payloadContent })
+    if (reasons.length) return { publish: false, reasons }
+    const t = await (checks.findTarget ?? findTarget)({ token, repo, environment: deploymentEnvironment(site, environment) })
+    if (!t.ok) return { publish: false, reasons: t.reasons }
+    return {
+      publish: true,
+      kind: 'content',
+      commit: t.sha,
+      pr: t.pr,
+      approver: t.approver,
+      prs: t.prs,
+      rebuild: { basis: t.basis, tag: t.tag, contentSha256: payloadContent },
+      reasons: [],
+    }
+  }
   if (event === 'repository_dispatch' && dispatch === GO_LIVE.action) {
     // The sender and the payload come from whoever sent the dispatch: only shown, never trusted, and shown tamed.
     const shown = (v, none) => (v ? String(v).replace(/[^\w./[\]-]/g, '?').slice(0, 60) : none)
@@ -92,8 +128,8 @@ export async function verify({ token, repo, ref, sha, event, dispatch, sender, s
 }
 
 /** Reads the stored manifest, waiting for deploy-preview to store the commit's build. */
-export async function waitForManifest({ store, site, commit, waitMs = 20 * 60_000, pollMs = 30_000, log = console.log }) {
-  const key = manifestKey(site, commit)
+export async function waitForManifest({ store, site, commit, rebuild = null, waitMs = 20 * 60_000, pollMs = 30_000, log = console.log }) {
+  const key = manifestKey(site, commit, rebuild)
   const until = Date.now() + waitMs
   for (;;) {
     const got = await store.get(PREVIEW_BUCKET, key)
@@ -109,14 +145,14 @@ export async function waitForManifest({ store, site, commit, waitMs = 20 * 60_00
  * @returns {Promise<{ manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[],
  *   copies: number, deletes: number, unchanged: number, invalidation: string }>}
  */
-export async function publishLive({ store, site, repo, commit, distributionId, stored, maxShare = DEFAULT_MAX_DELETE_SHARE, waitMs, pollMs, log = console.log }) {
-  stored ??= await waitForManifest({ store, site, commit, waitMs, pollMs, log })
+export async function publishLive({ store, site, repo, commit, rebuild = null, distributionId, stored, maxShare = DEFAULT_MAX_DELETE_SHARE, waitMs, pollMs, log = console.log }) {
+  stored ??= await waitForManifest({ store, site, commit, rebuild, waitMs, pollMs, log })
   const manifestSha256 = hashes(stored.body).sha256
-  const manifest = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit })
+  const manifest = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit, rebuild })
 
   // The bytes themselves, not S3's word for them: this is what goes live.
   const files = await pool(manifest, PARALLEL, async (f) => {
-    const obj = await store.get(PREVIEW_BUCKET, storedKey(site, commit, f.path))
+    const obj = await store.get(PREVIEW_BUCKET, storedKey(site, commit, f.path, rebuild))
     if (!obj) throw new Error(`stored build is missing ${f.path}`)
     const h = hashes(obj.body)
     if (h.size !== f.size || h.sha256 !== f.sha256) throw new Error(`stored ${f.path} doesn't match the manifest`)
@@ -131,7 +167,7 @@ export async function publishLive({ store, site, repo, commit, distributionId, s
   const refusal = deleteGuard({ current: current.length, deletes: plan.deletes.length, maxShare })
   if (refusal) throw new Error(refusal)
 
-  await pool(plan.copies, PARALLEL, (file) => store.copy(PREVIEW_BUCKET, storedKey(site, commit, file), bucket, file))
+  await pool(plan.copies, PARALLEL, (file) => store.copy(PREVIEW_BUCKET, storedKey(site, commit, file, rebuild), bucket, file))
   if (plan.deletes.length) await store.deleteMany(bucket, plan.deletes)
   log(`live: ${plan.copies.length} copied, ${plan.deletes.length} deleted, ${plan.unchanged} unchanged`)
 
@@ -269,8 +305,12 @@ export function deploymentEnvironment(site, value = 'live') {
   return env
 }
 
-/** The deployment record's payload: what was published, why it was allowed, and from which build. */
-export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl }) {
+/**
+ * The deployment record's payload: what was published, why it was allowed, and from which build. A content rebuild
+ * also names its run (the stored rebuild's folder, _builds/<site>/<commit>/rebuilds/<run>/, which platform's fleet
+ * report checks live against), what it rebuilt and the content hash platform sent.
+ */
+export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl, rebuild = null }) {
   return {
     kind,
     commit,
@@ -281,18 +321,35 @@ export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha
     workflow_sha: workflowSha,
     site_url: `https://${domain}`,
     run: runUrl,
+    ...(rebuild ? { rebuild: { run: rebuild.run, basis: rebuild.basis ?? null, tag: rebuild.tag ?? null, content_sha256: rebuild.contentSha256 ?? null } } : {}),
   }
 }
 
 /** The release kinds publish accepts. */
-export const KINDS = ['version', 'dependency', 'go-live']
+export const KINDS = ['version', 'dependency', 'go-live', 'content']
 
 /** What allowed a release, in a line. */
-export function describe({ kind, pr, approver, prs }) {
+export function describe({ kind, pr, approver, prs, commit, rebuild }) {
   if (kind === 'version') return `release PR #${pr}, approved by ${approver}`
   if (kind === 'go-live') return "go-live release of main's head, before the alias move"
   if (kind === 'dependency') return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}`
+  if (kind === 'content') return describeTarget({ sha: commit ?? '', basis: rebuild?.basis, tag: rebuild?.tag, contentSha256: rebuild?.contentSha256 })
   throw new Error(`unknown release kind ${kind}`)
+}
+
+/**
+ * A content rebuild republishes a site that is live on its domain. A distribution with no aliases yet (an alias move
+ * under way) is refused, and so is a site whose live commit moved since the rebuild found its target (a release
+ * published meanwhile), which would otherwise go back to older code.
+ * @returns {string | null} the refusal
+ */
+export function contentRefusal(kind, { distributionId, domain, site, commit, liveSha }) {
+  if (kind !== 'content') return null
+  if (!domain) return `a content rebuild republishes a live site, but ${distributionId} serves no name yet (an alias move under way): ${site} gets content rebuilds once its names have moved`
+  if (liveSha !== commit) {
+    return `live moved from ${commit.slice(0, 7)} to ${liveSha ? liveSha.slice(0, 7) : 'nothing'} since this content rebuild found its target, so it isn't published (platform's next check rebuilds the new commit if the content still differs)`
+  }
+  return null
 }
 
 /**
@@ -306,9 +363,21 @@ export function goLiveRefusal(kind, { distributionId, domain, site }) {
 }
 
 async function verifyMain() {
-  const { GH_TOKEN: token, REPO: repo, REF: ref, SHA: sha, EVENT: event, DISPATCH: dispatch, SENDER: sender, SITE: site, PAYLOAD_SITE: payloadSite } = process.env
+  const {
+    GH_TOKEN: token,
+    REPO: repo,
+    REF: ref,
+    SHA: sha,
+    EVENT: event,
+    DISPATCH: dispatch,
+    SENDER: sender,
+    SITE: site,
+    PAYLOAD_SITE: payloadSite,
+    PAYLOAD_CONTENT: payloadContent,
+    DEPLOYMENT: environment,
+  } = process.env
   if (!token || !repo || !ref) throw new Error('GH_TOKEN, REPO and REF must be set')
-  const result = await verify({ token, repo, ref, sha: checkSha(sha), event, dispatch, sender, site, payloadSite })
+  const result = await verify({ token, repo, ref, sha: checkSha(sha), event, dispatch, sender, site, payloadSite, payloadContent, environment })
   output('publish', String(result.publish))
   if (result.nothing) {
     console.log('::notice::no dependency update since the last release; nothing to publish')
@@ -322,13 +391,19 @@ async function verifyMain() {
     summary(`### Release refused\n\n${result.reasons.map((r) => `- ${r}`).join('\n')}`)
     process.exit(1)
   }
+  // What publish publishes: the run's own commit, or, for a content rebuild, the live commit verify found.
+  const commit = checkSha(result.commit ?? sha)
   output('kind', result.kind)
+  output('commit', commit)
   output('release-pr', result.pr ?? '')
   output('approver', result.approver ?? '')
   output('dependency-prs', (result.prs ?? []).join(','))
-  const why = describe(result)
-  console.log(`release of ${sha} accepted (${why})`)
-  summary(`### Release accepted\n\n\`${sha}\`: ${why}.`)
+  output('rebuild-basis', result.rebuild?.basis ?? '')
+  output('rebuild-tag', result.rebuild?.tag ?? '')
+  output('content-sha256', result.rebuild?.contentSha256 ?? '')
+  const why = describe({ ...result, commit })
+  console.log(`release of ${commit} accepted (${why})`)
+  summary(`### Release accepted\n\n\`${commit}\`: ${why}.`)
 }
 
 async function publishMain() {
@@ -336,12 +411,20 @@ async function publishMain() {
   const site = checkSite(env.SITE)
   const environment = deploymentEnvironment(site, env.DEPLOYMENT)
   const commit = checkSha(env.COMMIT)
+  // The run's own commit, which the OIDC token names. Only a content rebuild publishes another commit (the live one,
+  // verify's output); every other kind publishes exactly the run's.
+  const runSha = checkSha(env.RUN_SHA || env.COMMIT, 'run')
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const { REPO: repo, GH_TOKEN: token } = env
   if (!KINDS.includes(env.KIND)) throw new Error(`unknown release kind ${env.KIND}`)
+  if (env.KIND !== 'content' && commit !== runSha) throw new Error(`a ${env.KIND} release publishes the run's own commit ${runSha}, not ${commit}`)
+  const rebuild =
+    env.KIND === 'content'
+      ? { run: checkRun(env.REBUILD_RUN), basis: env.REBUILD_BASIS || null, tag: env.REBUILD_TAG || null, contentSha256: env.CONTENT_SHA256 || null }
+      : null
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
 
-  const problems = checkClaims(await requestClaims(), { workflow: 'release.yml', workflowSha, repo, commit })
+  const problems = checkClaims(await requestClaims(), { workflow: 'release.yml', workflowSha, repo, commit: runSha })
   if (problems.length) throw new Error(`the OIDC token doesn't match this run: ${problems.join('; ')}`)
 
   const { awsStore } = await import('./lib/aws.mjs')
@@ -349,12 +432,20 @@ async function publishMain() {
   const { distributionId, domain, host } = await findLive(store, site)
   const refusal = goLiveRefusal(env.KIND, { distributionId, domain, site })
   if (refusal) throw new Error(refusal)
+  // A content rebuild: only where the site is live on its domain, and only while live still runs its commit. Asked
+  // again right before anything is written, below, since this job may have queued behind another release.
+  const liveNow = async () => ((await liveDeployment(token, repo, environment))?.sha ?? null)
+  if (rebuild) {
+    const early = contentRefusal(env.KIND, { distributionId, domain, site, commit, liveSha: await liveNow() })
+    if (early) throw new Error(early)
+  }
   if (!domain) console.log(`::notice::${site}: the distribution has no aliases yet (an alias move); publishing to it and checking it at https://${host}`)
   output('site-url', `https://${host}`)
 
   const base = {
     kind: env.KIND,
     commit,
+    rebuild,
     pr: env.RELEASE_PR ? Number(env.RELEASE_PR) : null,
     approver: env.APPROVER || null,
     prs: env.DEPENDENCY_PRS ? env.DEPENDENCY_PRS.split(',').map(Number) : [],
@@ -363,7 +454,7 @@ async function publishMain() {
     runUrl: env.RUN_URL,
   }
   // The manifest first, so the deployment record names it from the start.
-  const stored = await waitForManifest({ store, site, commit })
+  const stored = await waitForManifest({ store, site, commit, rebuild: rebuild?.run ?? null })
   base.manifestSha256 = hashes(stored.body).sha256
   // The wait above can last 20 minutes: a go-live release asks again, right before anything is written, so names that
   // moved meanwhile stop it.
@@ -372,8 +463,12 @@ async function publishMain() {
     const late = goLiveRefusal(env.KIND, { ...again, site })
     if (late || again.distributionId !== distributionId) throw new Error(late ?? `${site}'s distribution changed from ${distributionId} to ${again.distributionId} while waiting`)
   }
+  if (rebuild) {
+    const late = contentRefusal(env.KIND, { distributionId, domain, site, commit, liveSha: await liveNow() })
+    if (late) throw new Error(late)
+  }
 
-  const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs })
+  const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs, commit, rebuild })
   const deployment = await gh(token, `/repos/${repo}/deployments`, {
     method: 'POST',
     body: {
@@ -394,7 +489,7 @@ async function publishMain() {
   await status('in_progress', 'publishing')
 
   try {
-    const result = await publishLive({ store, site, repo, commit, distributionId, stored, maxShare })
+    const result = await publishLive({ store, site, repo, commit, rebuild: rebuild?.run ?? null, distributionId, stored, maxShare })
     const siteProblems = await checkLiveSite({ domain, site, host, files: result.files })
     summary(
       `### Live\n\nhttps://${host}: ${result.copies} copied, ${result.deletes} deleted, ${result.unchanged} unchanged, cache cleared (${result.invalidation}).\n\n` +

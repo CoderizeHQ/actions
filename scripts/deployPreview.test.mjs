@@ -103,3 +103,25 @@ test('publishing deletes only inside the site folder, and refuses a mass delete'
   assert.equal(result.deletes, 40)
   assert.ok(await store.get(PREVIEW_BUCKET, 'sites/other-com/index.html'), "another site's preview is untouched")
 })
+
+test("a content rebuild is stored write-once in its run's own folder, beside the commit's first build, which it never touches", async () => {
+  const store = memoryStore()
+  const first = await build(site1)
+  await storeBuild({ store, buildDir: first, ...common })
+  const rebuilt = await build({ ...site1, 'index.html': '<h1>home, with new events</h1>', 'events/new/index.html': '<h1>new</h1>' })
+  const rebuild = { run: '4242', contentSha256: 'c'.repeat(64) }
+  const stored = await storeBuild({ store, buildDir: rebuilt, ...common, rebuild })
+  assert.equal(stored.reused, false)
+  assert.equal(stored.files.length, 5)
+  const manifest = JSON.parse((await store.get(PREVIEW_BUCKET, manifestKey(site, commit, '4242'))).body)
+  assert.deepEqual(manifest.rebuild, { run: '4242', content_sha256: 'c'.repeat(64) })
+  assert.equal(manifest.commit, commit)
+  assert.equal((await store.get(PREVIEW_BUCKET, storedKey(site, commit, 'index.html', '4242'))).body.toString(), '<h1>home, with new events</h1>')
+  // The first build is still exactly what it was.
+  assert.equal((await store.get(PREVIEW_BUCKET, storedKey(site, commit, 'index.html'))).body.toString(), '<h1>home</h1>')
+  assert.equal('rebuild' in JSON.parse((await store.get(PREVIEW_BUCKET, manifestKey(site, commit))).body), false)
+  // The same run again (a re-run) reuses its own rebuild.
+  assert.equal((await storeBuild({ store, buildDir: rebuilt, ...common, rebuild })).reused, true)
+  await rm(first, { recursive: true })
+  await rm(rebuilt, { recursive: true })
+})

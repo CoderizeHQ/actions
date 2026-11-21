@@ -6,14 +6,19 @@
 // 3. checks every stored file against the manifest (size and S3's own SHA-256);
 // 4. when the commit is still main's head, copies the stored build into sites/<site>/ server-side, deletes what the
 //    build no longer has (refusing a mass delete), and clears the preview cache only if something changed.
+//
+// A content rebuild (lib/rebuild.mjs; the site's platform-written rebuild workflow, with `rebuild-commit`) builds the
+// commit live runs now, not the run's own, and stores it under _builds/<site>/<commit>/rebuilds/<run>/ instead, the
+// same way (write-once, manifest last, checked). It never touches the preview: that shows main's head.
 
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import {
-  buildPrefix,
+  checkRun,
   checkSha,
   checkSite,
+  CONTENT_SHA256,
   DEFAULT_MAX_DELETE_SHARE,
   deleteGuard,
   makeManifest,
@@ -26,6 +31,7 @@ import {
   previewPrefix,
   readManifest,
   storedKey,
+  storedPrefix,
 } from './lib/build.mjs'
 import { cacheControlFor, contentTypeFor, hashes, plainEtag, walkBuild } from './lib/files.mjs'
 import { checkClaims, requestClaims } from './lib/oidc.mjs'
@@ -34,23 +40,25 @@ import { output, runIfMain, summary } from './lib/report.mjs'
 const PARALLEL = 8
 
 /**
- * Stores the build for `commit`, or reuses the complete one already there, then checks it against its manifest.
+ * Stores the build for `commit`, or reuses the complete one already there, then checks it against its manifest. With
+ * `rebuild` ({ run, contentSha256 }), it is that content rebuild's build, stored in its own folder.
  * @returns {Promise<{ reused: boolean, manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[] }>}
  */
-export async function storeBuild({ store, site, repo, commit, buildDir, workflowSha, lockfileSha256, now = new Date(), log = console.log }) {
-  const key = manifestKey(site, commit)
+export async function storeBuild({ store, site, repo, commit, rebuild = null, buildDir, workflowSha, lockfileSha256, now = new Date(), log = console.log }) {
+  const run = rebuild?.run ?? null
+  const key = manifestKey(site, commit, run)
   let stored = await store.get(PREVIEW_BUCKET, key)
   const reused = Boolean(stored)
 
   if (stored) {
-    log(`a complete build of ${commit} is already stored; reusing it (this run's build is not used)`)
+    log(`a complete build of ${commit} is already stored${run ? ` for content rebuild ${run}` : ''}; reusing it (this run's build is not used)`)
   } else {
     const local = await walkBuild(buildDir)
-    log(`storing ${local.length} files under ${buildPrefix(site, commit)}`)
+    log(`storing ${local.length} files under ${storedPrefix(site, commit, run)}`)
     await pool(local, PARALLEL, async (f) => {
       const body = await readFile(path.join(buildDir, f.path))
       if (hashes(body).sha256 !== f.sha256) throw new Error(`${f.path} changed while deploying`)
-      const result = await store.putIfAbsent(PREVIEW_BUCKET, storedKey(site, commit, f.path), body, {
+      const result = await store.putIfAbsent(PREVIEW_BUCKET, storedKey(site, commit, f.path, run), body, {
         contentType: contentTypeFor(f.path),
         cacheControl: cacheControlFor(f.path),
         sha256: f.sha256,
@@ -58,14 +66,14 @@ export async function storeBuild({ store, site, repo, commit, buildDir, workflow
       if (result === 'exists') {
         // Left by an earlier run that stopped before its manifest. Fine if it's the same file; a different file means
         // the build isn't reproducible, and the write-once store can't take a second version of this commit.
-        const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path))
+        const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path, run))
         if (head?.sha256 !== f.sha256) {
           throw new Error(`${f.path} is already stored for ${commit} with different content; this commit can't be stored again. Push a new commit to deploy`)
         }
       }
     })
 
-    const manifest = makeManifest({ site, repo, commit, workflowSha, lockfileSha256, created: now.toISOString(), files: local })
+    const manifest = makeManifest({ site, repo, commit, workflowSha, lockfileSha256, created: now.toISOString(), files: local, rebuild })
     const body = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)
     const result = await store.putIfAbsent(PREVIEW_BUCKET, key, body, {
       contentType: 'application/json; charset=utf-8',
@@ -78,9 +86,9 @@ export async function storeBuild({ store, site, repo, commit, buildDir, workflow
   }
 
   const manifestSha256 = hashes(stored.body).sha256
-  const files = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit })
+  const files = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit, rebuild: run })
   const checked = await pool(files, PARALLEL, async (f) => {
-    const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path))
+    const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path, run))
     if (!head) throw new Error(`stored build is missing ${f.path}`)
     if (head.size !== f.size) throw new Error(`stored ${f.path} is ${head.size} bytes; the manifest says ${f.size}`)
     if (head.sha256 !== f.sha256) throw new Error(`stored ${f.path} doesn't match its manifest hash`)
@@ -119,12 +127,16 @@ async function main() {
   const env = process.env
   const site = checkSite(env.SITE)
   const commit = checkSha(env.COMMIT)
+  // The run's own commit, which the OIDC token names: the commit built, except in a content rebuild.
+  const runSha = checkSha(env.RUN_SHA || env.COMMIT, 'run')
+  const rebuild = env.REBUILD_RUN ? { run: checkRun(env.REBUILD_RUN), contentSha256: CONTENT_SHA256.test(env.CONTENT_SHA256 ?? '') ? env.CONTENT_SHA256 : null } : null
+  if (!rebuild && commit !== runSha) throw new Error(`deploy-preview builds the run's own commit ${runSha}, not ${commit}, except in a content rebuild`)
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const repo = env.REPO
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
   if (!/^[0-9a-f]{64}$/.test(env.LOCKFILE_SHA256 ?? '')) throw new Error('LOCKFILE_SHA256 is not a SHA-256')
 
-  const problems = checkClaims(await requestClaims(), { workflow: 'deploy-preview.yml', workflowSha, repo, commit })
+  const problems = checkClaims(await requestClaims(), { workflow: 'deploy-preview.yml', workflowSha, repo, commit: runSha })
   if (problems.length) throw new Error(`the OIDC token doesn't match this run: ${problems.join('; ')}`)
 
   const { awsStore } = await import('./lib/aws.mjs')
@@ -134,6 +146,7 @@ async function main() {
     site,
     repo,
     commit,
+    rebuild,
     buildDir: env.BUILD_DIR,
     workflowSha,
     lockfileSha256: env.LOCKFILE_SHA256,
@@ -141,9 +154,15 @@ async function main() {
   output('manifest-sha256', stored.manifestSha256)
   const how = stored.reused ? 'Reused' : 'Stored'
   summary(
-    `### Stored build\n\n${how} \`${buildPrefix(site, commit)}\`: ${stored.files.length} files, ` +
+    `### Stored build\n\n${how} \`${storedPrefix(site, commit, rebuild?.run ?? null)}\`: ${stored.files.length} files, ` +
       `manifest SHA-256 \`${stored.manifestSha256}\`.`,
   )
+
+  if (rebuild) {
+    console.log(`::notice::content rebuild of ${commit} stored for release; the preview shows main's head and is left alone`)
+    summary("Preview not updated: this is a content rebuild of the live commit, and the preview shows main's head.")
+    return
+  }
 
   if (env.PUBLISH !== 'true') {
     console.log(`::notice::${commit} is no longer main's head; stored its build but left the preview to the newer run`)
