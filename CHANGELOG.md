@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.7.0](https://github.com/CoderizeHQ/actions/compare/v1.6.0...v1.7.0) (2026-11-21)
+
+
+### Features
+
+* publish a site's go-live release from platform's apply, before its alias move ([#45](https://github.com/CoderizeHQ/actions/issues/45)) ([cb8b45a](https://github.com/CoderizeHQ/actions/commit/cb8b45adc3f97313fe4c779a7ab26a8eb99854cd))
+
+
+### Bug Fixes
+
+* warn instead of failing on a site role the next apply makes ([#44](https://github.com/CoderizeHQ/actions/issues/44)) ([d08dd28](https://github.com/CoderizeHQ/actions/commit/d08dd28f1ea3be1d13bf066e867174f6ee28a338))
+
 ## [1.6.0](https://github.com/CoderizeHQ/actions/compare/v1.5.0...v1.6.0) (2026-11-20)
 
 
