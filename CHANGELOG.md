@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/CoderizeHQ/actions/compare/v1.7.0...v1.7.1) (2026-11-21)
+
+
+### Bug Fixes
+
+* let a workspace package's package.json justify a lockfile change in ci-site ([#48](https://github.com/CoderizeHQ/actions/issues/48)) ([c2d8e61](https://github.com/CoderizeHQ/actions/commit/c2d8e613f147e0d3b0509259ad6ee6c3b93308d4))
+
 ## [1.7.0](https://github.com/CoderizeHQ/actions/compare/v1.6.0...v1.7.0) (2026-11-21)
 
 
