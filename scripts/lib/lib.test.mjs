@@ -7,6 +7,24 @@ import { test } from 'node:test'
 import { DELETE_FLOOR, deleteGuard, liveRoleArn, makeManifest, planSync, previewRoleArn, readManifest, storedKey } from './build.mjs'
 import { CACHE_IMMUTABLE, CACHE_SHORT, cacheControlFor, checkPath, contentTypeFor, walkBuild } from './files.mjs'
 import { checkClaims, decodeClaims } from './oidc.mjs'
+import { notClosedToEveryCrawler, robotsGroups } from './robots.mjs'
+
+test('robots.txt groups: consecutive user agents share one, rules before any agent are ignored', () => {
+  assert.deepEqual(robotsGroups('Disallow: /x\nUser-agent: A\nUser-agent: B\nDisallow: /\nUser-agent: *\nAllow: /\n'), [
+    { agents: ['a', 'b'], rules: [{ field: 'disallow', value: '/' }] },
+    { agents: ['*'], rules: [{ field: 'allow', value: '/' }] },
+  ])
+})
+
+test('closed to every crawler: a * group, and every group disallows / with no Allow path', () => {
+  assert.deepEqual(notClosedToEveryCrawler('# app\nUser-agent: *\nDisallow: /\n'), [])
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: GPTBot\nUser-agent: *\nDisallow: /\nAllow:\n'), [])
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: Googlebot\nDisallow: /\n'), ['robots.txt has no `User-agent: *` group'])
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nDisallow: /\nUser-agent: Bingbot\nDisallow: /private\n'), ["robots.txt's group for bingbot doesn't disallow /"])
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nDisallow: /\nAllow: /e/\n'), ["robots.txt's group for * allows /e/"])
+  // Any line between User-agent lines ends the group: the * group here has only a Crawl-delay.
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nCrawl-delay: 10\nUser-agent: Googlebot\nDisallow: /\n'), ["robots.txt's group for * doesn't disallow /"])
+})
 
 const SHA = 'a'.repeat(40)
 

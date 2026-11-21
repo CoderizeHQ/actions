@@ -51,7 +51,7 @@ required workflow that isn't there blocks every PR it covers.
 | --- | --- | --- | --- | --- |
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
-| `ci-site.yml` | `site-checks.yml` | `build-dir` (`dist`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
+| `ci-site.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `indexed` (`true`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main | `site`, `build-dir` (`dist`), `max-delete-share` (`0.25`) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
@@ -89,7 +89,11 @@ In this order, so nothing from the site runs before the checks on its committed 
 9. `scripts/seoCheck.mjs` on the build: robots.txt present, not blocking every crawler, naming a sitemap in the
    build; every sitemap URL https on the host robots.txt names, built, indexable and without a trailing slash; one
    absolute https canonical per indexable page on that host, no trailing slash, not the home page's elsewhere; a
-   non-empty, unique `<title>` per page; no internal link with a trailing slash.
+   non-empty, unique `<title>` per page; no internal link with a trailing slash. With `indexed: false` (noindex
+   mode: only platform's `app-checks.yml` passes it, for a site whose record says `"indexed": false`, from the app
+   repo's `SITE_PACKAGES` variable, which a PR can't change), robots.txt must instead disallow every crawler from the
+   whole site and name no sitemap, the build has no `sitemap*.xml`, and pages need no canonical (one that is there is
+   still checked); titles and links are checked as usual.
 
 ### ci-node
 
@@ -183,7 +187,10 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
      make; never a multipart copy, which IAM refuses), deletes what the build doesn't have (same mass-delete guard),
      then checks the bucket holds exactly the build (sizes and MD5 ETags of the checked bytes);
    - invalidates `/*` and waits, then checks the live home page and robots.txt are this build's bytes, robots.txt
-     doesn't block every crawler and names a sitemap on the site's own host, and the sitemap answers;
+     doesn't block every crawler and names a sitemap on the site's own host, and the sitemap answers. A site whose
+     home page comes back with `X-Robots-Tag: noindex` is noindex on purpose (that header comes only from platform's
+     `coderizehq-live-noindex` headers policy, which only a record with `"indexed": false` gets; a build can't set
+     it): its robots.txt must instead disallow every crawler and name no sitemap, and no sitemap is fetched;
    - marks the deployment successful, or failed with the reason.
 3. `notify`: emails ops@coderize.dev when `publish` succeeded, or when `verify` or `publish` failed (a refusal
    included, with its reasons). Nothing is sent when there was nothing to publish, or for a run on a ref release can

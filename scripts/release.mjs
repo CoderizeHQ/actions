@@ -21,7 +21,10 @@
 //    may make), and deletes what the build doesn't have, refusing a mass delete;
 // 4. checks the live bucket again: every file there, by size and ETag (the MD5 of the checked bytes), nothing extra;
 // 5. clears the live cache and waits for that, then checks the live home page and robots.txt serve this build and
-//    the sitemap answers;
+//    the sitemap answers. A site the live home page answers with `X-Robots-Tag: noindex` is noindex on purpose: that
+//    header comes only from platform's `coderizehq-live-noindex` headers policy, which it gives only to a record
+//    with `"indexed": false` (a build can't set it). For such a site robots.txt must instead disallow every crawler
+//    and name no sitemap (robotsProblems' `noindex`), and no sitemap is fetched;
 // 6. records it all as a GitHub deployment to `live`, created once the manifest is read (its payload names the commit,
 //    the release PR, the approver and the manifest hash) and marked successful or failed at the end.
 
@@ -39,6 +42,7 @@ import {
   storedKey,
 } from './lib/build.mjs'
 import { hashes, plainEtag } from './lib/files.mjs'
+import { notClosedToEveryCrawler } from './lib/robots.mjs'
 import { gh } from './lib/github.mjs'
 import { checkClaims, requestClaims } from './lib/oidc.mjs'
 import { output, runIfMain, summary } from './lib/report.mjs'
@@ -178,8 +182,13 @@ export function isSiteHost(host, { domain, site }) {
   return host.replace(/^www\./, '').replaceAll('.', '-') === site
 }
 
-/** Problems with a robots.txt that would hide the site (the preview-robots-ships-to-live lesson). */
-export function robotsProblems(text) {
+/**
+ * Problems with a robots.txt that would hide the site (the preview-robots-ships-to-live lesson), or, with `noindex`
+ * (a site platform serves with `X-Robots-Tag: noindex`, step 5), one that would let crawlers in or names a sitemap.
+ * @param {string} text
+ * @param {{ noindex?: boolean }} [opts]
+ */
+export function robotsProblems(text, { noindex = false } = {}) {
   const problems = []
   let agents = []
   let inRules = false
@@ -199,6 +208,11 @@ export function robotsProblems(text) {
       if (field === 'disallow' && value === '/' && agents.includes('*')) blocked.add('*')
     }
   }
+  if (noindex) {
+    for (const p of notClosedToEveryCrawler(text)) problems.push(`${p}: it must disallow every crawler from the whole site, since the site is served noindex (its record says indexed: false)`)
+    if (sitemapsIn(text).length) problems.push('robots.txt names a Sitemap, but the site is served noindex (its record says indexed: false)')
+    return problems
+  }
   if (blocked.has('*')) problems.push('robots.txt disallows every crawler from the whole site')
   if (!sitemapsIn(text).length) problems.push('robots.txt names no Sitemap')
   return problems
@@ -217,7 +231,7 @@ export async function checkLiveSite({ domain, site, host = domain, files, fetchI
   const byPath = new Map(files.map((f) => [f.path, f]))
   const get = async (url) => {
     const res = await fetchImpl(url, { redirect: 'follow', headers: { 'cache-control': 'no-cache' } })
-    return { status: res.status, url: res.url || url, body: Buffer.from(await res.arrayBuffer()) }
+    return { status: res.status, url: res.url || url, headers: res.headers, body: Buffer.from(await res.arrayBuffer()) }
   }
   const matches = (r, file) => r.status === 200 && (!byPath.has(file) || hashes(r.body).sha256 === byPath.get(file).sha256)
 
@@ -239,7 +253,10 @@ export async function checkLiveSite({ domain, site, host = domain, files, fetchI
   if (robots.status !== 200) return problems
 
   const text = robots.body.toString('utf8')
-  problems.push(...robotsProblems(text))
+  // Platform's live noindex headers policy, given only to a record with "indexed": false (step 5 above).
+  const noindex = /(^|[\s,])(noindex|none)($|[\s,])/i.test(home.headers?.get?.('x-robots-tag') ?? '')
+  problems.push(...robotsProblems(text, { noindex }))
+  if (noindex) return problems
   for (const url of sitemapsIn(text)) {
     let parsed
     try {
