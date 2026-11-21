@@ -102,7 +102,8 @@ jobs:
 
       # A lockfile change with no package.json change is how a dependency gets swapped without anyone noticing.
       # Only Renovate's own lockfile updates may do it: its App opened the PR, from a renovate/** branch (which only
-      # Renovate can write), and every commit is Renovate's.
+      # Renovate can write), and every commit is Renovate's. In a workspace any package's package.json counts: an
+      # app's dependency change moves the one root lockfile without touching the root package.json.
       - name: Lockfile changes need a package.json change
         if: github.event_name == 'pull_request'
         working-directory: site
@@ -116,7 +117,7 @@ jobs:
           renovate_id=357122915
           renovate_email="${renovate_id}+coderizehq-renovate[bot]@users.noreply.github.com"
           changed=$(git diff --name-only "$BASE...$HEAD")
-          if grep -qx 'pnpm-lock.yaml' <<<"$changed" && ! grep -qx 'package.json' <<<"$changed"; then
+          if grep -qx 'pnpm-lock.yaml' <<<"$changed" && ! grep -qE '(^|/)package\.json$' <<<"$changed"; then
             others=$(git log --format=%ae "$BASE..$HEAD" | grep -vxF "$renovate_email" || true)
             if [ "$AUTHOR_ID" = "$renovate_id" ] && [[ "$HEAD_REF" == renovate/* ]] && [ -z "$others" ]; then
               echo "Renovate lockfile update: allowed"
