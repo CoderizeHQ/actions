@@ -22,6 +22,8 @@ test('closed to every crawler: a * group, and every group disallows / with no Al
   assert.deepEqual(notClosedToEveryCrawler('User-agent: Googlebot\nDisallow: /\n'), ['robots.txt has no `User-agent: *` group'])
   assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nDisallow: /\nUser-agent: Bingbot\nDisallow: /private\n'), ["robots.txt's group for bingbot doesn't disallow /"])
   assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nDisallow: /\nAllow: /e/\n'), ["robots.txt's group for * allows /e/"])
+  // Any line between User-agent lines ends the group: the * group here has only a Crawl-delay.
+  assert.deepEqual(notClosedToEveryCrawler('User-agent: *\nCrawl-delay: 10\nUser-agent: Googlebot\nDisallow: /\n'), ["robots.txt's group for * doesn't disallow /"])
 })
 
 const SHA = 'a'.repeat(40)

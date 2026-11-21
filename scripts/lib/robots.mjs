@@ -18,14 +18,19 @@ export function robotsGroups(text) {
     const field = m[1].toLowerCase()
     const value = m[2].trim()
     if (field === 'user-agent') {
-      if (!group || group.rules.length) {
-        group = { agents: [], rules: [] }
+      if (!group || group.closed) {
+        group = { agents: [], rules: [], closed: false }
         groups.push(group)
       }
       group.agents.push(value.toLowerCase())
-    } else if ((field === 'disallow' || field === 'allow') && group) group.rules.push({ field, value })
+    } else if (field !== 'sitemap' && group) {
+      // Any other line in a group (a rule, Crawl-delay, ...) ends its run of User-agent lines: the next one starts a
+      // new group. Sitemap lines belong to no group.
+      group.closed = true
+      if (field === 'disallow' || field === 'allow') group.rules.push({ field, value })
+    }
   }
-  return groups
+  return groups.map(({ agents, rules }) => ({ agents, rules }))
 }
 
 /**
