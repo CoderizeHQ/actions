@@ -241,7 +241,8 @@ the live role for `release.yml` in the `release` environment on main), and both 
 For a live site whose build bakes in data from a feed that needs credentials and has to stay fresh by a rule
 (lapeerrealty.com's MLS listings: Realcomp allows displayed data at most 12 hours old; James, C2614). Platform's record
 field `refresh` (`{ "every": "3h", "secrets": ["REALCOMP_CLIENT_ID", "REALCOMP_CLIENT_SECRET"] }`) opts a site in,
-gives its repo a main-only `refresh` environment (`refresh-<site>` for a package site) whose secrets James types in,
+gives its repo a `refresh` environment (`refresh-<site>` for a package site; main and version tags only, since a
+release builds there too) whose secrets James types in,
 and platform's refresh check (its `release-bootstrap.yml`, as the release App) sends the site's repo the
 `repository_dispatch` `data-refresh` (`{ site, reason }`) every `every` hours and straight after a release publishes.
 **The code is always the commit James approved in the site's last release; only the feed data changes.** The site's
@@ -255,8 +256,9 @@ platform-written refresh workflow (`refresh.yml`, or `refresh-<site>.yml` in an 
    job that names it, and the calling job can't, so the caller passes them with `secrets: inherit`), checks the
    inputs (the environment matches the package, each name follows platform's rules again: none the runner or the
    build's tools read, none a framework inlines into pages), checks out the commit, hashes the lockfile, runs
-   `pnpm install` with no secrets, then takes only the named secrets (a missing one fails here) into the build step,
-   builds and uploads `site-build`. It has Contents: read only: no `id-token`, so no AWS role can trust it.
+   `pnpm install` with no secrets, then takes only the named secrets (a missing one fails here) into a file only the
+   build step reads and deletes (never `$GITHUB_ENV`, so the upload never sees them), builds and uploads `site-build`.
+   `build-dir` must be a plain folder name. It has Contents: read only: no `id-token`, so no AWS role can trust it.
 3. `deploy-preview.yml` with `rebuild-commit` and `refresh-lockfile-sha256`: skips its own build, stores the run's
    `site-build` write-once at `_builds/<site>/<commit>/refreshes/<run>/` (its manifest says `refresh: { run }`), and
    leaves the preview alone. No secret reaches it.
@@ -277,8 +279,10 @@ isn't refreshable is published as before. `refresh` on a release records the usu
 `go-live`) with the `refresh` payload beside it.
 
 Trust: the live role and notify role are unchanged. Storing a refresh from a release on a version tag needs the
-preview role to trust `deploy-preview.yml` on the site repo's version tags as well as main (platform's
-`aws/trust/preview-deploy.json.tftpl`); tags are made only by the release App.
+preview role to trust `deploy-preview.yml` on the site repo's version tags as well as main: platform gives only a site
+with `refresh` the separate `aws/trust/preview-deploy-refresh.json.tftpl` (every other site keeps the main-only
+`preview-deploy.json.tftpl`); tags are made only by the release App. This is the cost of releasing with the data in
+one run (C2620 a).
 
 ### Notifications
 

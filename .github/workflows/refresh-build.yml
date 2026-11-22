@@ -12,9 +12,11 @@ name: refresh-build
 # An environment's secrets reach only a job that names the environment, and the calling job can't name one, so the
 # caller passes them with `secrets: inherit` and this job names the environment. Of everything inherit makes available,
 # only the record's names are read (each from secrets[name]), and only the build step gets them: `pnpm install` runs
-# before they are set. The job asks for nothing but Contents: read: no id-token, so no AWS role can trust it, and it
-# stores nothing; deploy-preview's store job, which gets no secrets, stores what it built. It emails nobody itself:
-# the caller's release job runs whatever this ended as, and refuses (and emails ops@) when it failed.
+# before they are read, and the upload after the build never sees them (they pass between the two steps in a file only
+# the build step reads, and deletes before it builds). The job asks for nothing but Contents: read: no id-token, so no
+# AWS role can trust it, and it stores nothing; deploy-preview's store job, which gets no secrets, stores what it built.
+# It emails nobody itself: the caller's release job runs whatever this ended as, and refuses (and emails ops@) when it
+# failed.
 on:
   workflow_call:
     inputs:
@@ -69,6 +71,7 @@ jobs:
           COMMIT: ${{ inputs.commit }}
           ENVIRONMENT: ${{ inputs.environment }}
           NAMES: ${{ inputs.secret-names }}
+          BUILD_DIR: ${{ inputs.build-dir }}
           EVENT: ${{ github.event_name }}
           DISPATCH: ${{ github.event.action }}
           SENDER: ${{ github.event.sender.login }}
@@ -77,6 +80,8 @@ jobs:
           fail() { echo "::error::$1"; exit 1; }
           [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || fail "site must be 1 to 38 of a-z, 0-9 and -"
           [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "commit must be a 40-character commit SHA"
+          # The upload takes this folder whole, hidden files included: never the runner's own files.
+          [[ "$BUILD_DIR" =~ ^[A-Za-z0-9_][A-Za-z0-9_./-]*$ && "$BUILD_DIR" != *..* && "$BUILD_DIR" != */ ]] || fail "build-dir is a folder inside the package (dist)"
           if [ -z "$PACKAGE" ]; then want=refresh; else want="refresh-$SITE"; fi
           [ "$ENVIRONMENT" = "$want" ] || fail "the refresh environment is $want, not $ENVIRONMENT"
           [[ "$GITHUB_REF" = refs/heads/main || "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "a refresh builds only on main or a version tag (got $GITHUB_REF)"
@@ -114,20 +119,23 @@ jobs:
       # No secrets yet: install scripts never see them.
       - run: pnpm install --frozen-lockfile
 
-      # The named secrets alone, from what the caller passed, into this job's environment for the steps after this one
-      # (the build, then the upload). ALL is this step's only, and nothing here prints a value: GitHub masks each one.
+      # The named secrets alone, from what the caller passed, into a file only the build step reads (NUL-separated
+      # NAME=value pairs, readable by the runner's user only). ALL is this step's only, and nothing here prints a value:
+      # GitHub masks each one. Not $GITHUB_ENV, which would hand them to every later step, the upload included.
       - name: Take the named secrets
         env:
           ALL: ${{ toJSON(secrets) }}
           NAMES: ${{ inputs.secret-names }}
           ENVIRONMENT: ${{ inputs.environment }}
         run: |
+          umask 077
+          file="$RUNNER_TEMP/refresh-secrets"
+          : > "$file"
           IFS=, read -ra names <<<"$NAMES"
           for n in "${names[@]}"; do
             v=$(jq -r --arg n "$n" '.[$n] // ""' <<<"$ALL")
-            [ -n "$v" ] || { echo "::error::$n isn't set in the $ENVIRONMENT environment (James types it in)"; exit 1; }
-            delim="REFRESH_$(openssl rand -hex 16)"
-            { echo "$n<<$delim"; printf '%s\n' "$v"; echo "$delim"; } >> "$GITHUB_ENV"
+            [ -n "$v" ] || { echo "::error::$n isn't set in the $ENVIRONMENT environment (James types it in)"; rm -f "$file"; exit 1; }
+            printf '%s=%s\0' "$n" "$v" >> "$file"
           done
           unset ALL
 
@@ -137,6 +145,10 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           BUILD_DIR: ${{ inputs.build-dir }}
         run: |
+          # The named secrets, for this step alone: read and deleted before anything from the site runs.
+          file="$RUNNER_TEMP/refresh-secrets"
+          while IFS= read -r -d '' pair; do export "$pair"; done < "$file"
+          rm -f "$file"
           # As deploy-preview builds: no package, the repo root; a package, exactly that one pnpm package.
           if [ -z "$PACKAGE" ]; then
             pnpm run build

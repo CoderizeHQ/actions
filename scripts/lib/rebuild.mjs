@@ -133,7 +133,9 @@ export async function findTarget({ token, repo, environment, refresh = false, ch
   if (live.kind === 'go-live' && !refresh) {
     return { ok: false, reasons: [`live ${short} is the go-live release (main's head before the alias move); content rebuilds start once a version release is live`] }
   }
-  if (!['version', 'dependency', 'content', 'refresh', ...(refresh ? ['go-live'] : [])].includes(live.kind)) {
+  // A content rebuild never rebuilds over a refresh: it builds with no secrets, so it would publish the site without its
+  // feed data (platform refuses the two fields together; this refuses it here too).
+  if (!['version', 'dependency', 'content', ...(refresh ? ['refresh', 'go-live'] : [])].includes(live.kind)) {
     return { ok: false, reasons: [`live ${short}'s deployment has kind ${shown(live.kind, '(none)')}, not one release records; look before ${what === 'refresh' ? 'refreshing' : 'rebuilding'} it`] }
   }
   const r = await approvedCommit({ token, repo, sha: live.sha, what: 'live', checks, read })

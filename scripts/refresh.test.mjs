@@ -59,6 +59,9 @@ test('the target: the live commit as an approved release, a refresh or a go-live
   const content = await findTarget({ token: 't', repo, environment: 'live', ...facts({ deployment: { id: 3, sha: live, kind: 'go-live' } }) })
   assert.match(content.reasons[0], /content rebuilds start once a version release is live/)
   assert.match((await find({ deployment: { id: 1, sha: live, kind: 'manual' } })).reasons[0], /before refreshing it/)
+  // A content rebuild never rebuilds over a refresh: it would publish the site without its feed data.
+  const over = await findTarget({ token: 't', repo, environment: 'live', ...facts({ deployment: { id: 2, sha: live, kind: 'refresh' } }) })
+  assert.match(over.reasons[0], /kind refresh, not one release records; look before rebuilding it/)
   assert.match((await find({ deployment: null })).reasons[0], /nothing to refresh/)
 })
 
@@ -207,7 +210,14 @@ test('refresh-build.yml: Contents: read only, the environment it is given, secre
   assert.doesNotMatch(wf, /secrets\.[A-Z]/)
   const take = wf.slice(wf.indexOf('- name: Take the named secrets'), wf.indexOf('- name: Build with the feed'))
   assert.match(take, /ALL: \$\{\{ toJSON\(secrets\) \}\}/)
-  assert.match(take, />> "\$GITHUB_ENV"/)
+  // Into a file only the build step reads and deletes, never $GITHUB_ENV (which every later step, the upload too, gets).
+  assert.doesNotMatch(code, /GITHUB_ENV/)
+  assert.match(take, /umask 077\n\s+file="\$RUNNER_TEMP\/refresh-secrets"/)
+  const buildStep = wf.slice(wf.indexOf('- name: Build with the feed'), wf.indexOf('actions/upload-artifact@'))
+  assert.match(buildStep, /while IFS= read -r -d '' pair; do export "\$pair"; done < "\$file"\n\s+rm -f "\$file"/)
+  assert.ok(buildStep.indexOf('rm -f "$file"') < buildStep.indexOf('pnpm run build'))
+  // build-dir is a plain folder, so the upload never takes the runner's own files.
+  assert.match(wf, /BUILD_DIR: \$\{\{ inputs\.build-dir \}\}[\s\S]*build-dir is a folder inside the package/)
   for (const l of wf.split('\n')) if (/^\s*run: /.test(l)) assert.doesNotMatch(l, /\$\{\{/, l)
   assert.match(wf, /name: site-build\n/)
 })
