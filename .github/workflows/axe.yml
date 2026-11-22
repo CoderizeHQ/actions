@@ -3,9 +3,11 @@ name: axe
 # The accessibility check each site's ci.yml calls on every PR:
 #   uses: CoderizeHQ/actions/.github/workflows/axe.yml@v1
 #   with: { min-pages: 5 }
-# Builds the site, serves the build the way live does, and runs axe on every built page in light and dark color
-# schemes, after the network is idle, against WCAG 2.2 AA including target size. It fails on any violation, a page
-# that doesn't answer 200, and fewer pages than expected: fewer than min-pages, or a sitemap URL with no built page.
+# Builds the site, serves the build the way live does, and runs axe on its pages in light and dark color schemes,
+# after the network is idle, against WCAG 2.2 AA including target size: every page, except that a big family of pages
+# from one template (/events/<slug>) is sampled, pages-per-template of them (README "axe"). It fails on any violation,
+# a page that doesn't answer 200, and fewer pages than expected: fewer than min-pages, or a sitemap URL with no built
+# page (both count every built page, not the sample).
 # No AWS and no secrets: it runs the PR's code. For a site in an app repo, platform's app-checks.yml passes the site's
 # package, and only that package is built and scanned.
 on:
@@ -23,6 +25,10 @@ on:
         description: The fewest pages the build may have
         type: number
         default: 1
+      pages-per-template:
+        description: How many pages of each big family of pages from one template to scan; 0 scans every page
+        type: number
+        default: 3
 
 permissions:
   contents: read
@@ -104,8 +110,9 @@ jobs:
             pnpm exec playwright install chromium
           fi
 
-      - name: Scan every page
+      - name: Scan the pages
         env:
           BUILD_DIR: site/${{ steps.build.outputs.dir }}
           MIN_PAGES: ${{ inputs.min-pages }}
+          PAGES_PER_TEMPLATE: ${{ inputs.pages-per-template }}
         run: node actions/scripts/axeScan.mjs
