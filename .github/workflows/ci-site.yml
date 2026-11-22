@@ -11,7 +11,11 @@ name: ci-site
 #
 # For a site in an app repo (platform README "Sites in an app repo"), platform's app-checks.yml passes the site's
 # package: the repo-wide checks run as they are, and Prettier, ESLint, the tests, the build and the SEO check run on
-# that package alone (the app's own tests run in ci-node, with their database).
+# that package alone (the app's own tests run in ci-node, with their database). For a site whose record says
+# `"indexed": false` (a sign-in app kept out of search on purpose), it also passes `indexed: false`, read from the app
+# repo's SITE_PACKAGES variable, which a PR can't change: the SEO check then wants a robots.txt that shuts every crawler
+# out and no sitemap (scripts/seoCheck.mjs, noindex mode). site-checks.yml passes no inputs, so a site repo is always
+# checked as indexed.
 on:
   workflow_call:
     inputs:
@@ -23,6 +27,10 @@ on:
         description: The site's pnpm package as a path (./apps/web), for a site in an app repo; empty for the repo root
         type: string
         default: ''
+      indexed:
+        description: false only for a site whose platform record says "indexed" false (platform's app-checks.yml passes it from SITE_PACKAGES)
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -225,4 +233,5 @@ jobs:
       - name: SEO check
         env:
           BUILD_DIR: site/${{ steps.build.outputs.dir }}
+          INDEXED: ${{ inputs.indexed }}
         run: node actions/scripts/seoCheck.mjs

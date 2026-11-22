@@ -140,6 +140,43 @@ test('live checks fail on an old home page, a missing sitemap or a sitemap on an
   assert.match((await checkLiveSite({ domain, files: withElsewhere, fetchImpl: other, waitMs: 0, ...quiet })).join(' '), /another host/)
 })
 
+test('with noindex, robots.txt must shut every crawler out and name no Sitemap', () => {
+  assert.deepEqual(robotsProblems('User-agent: *\nDisallow: /\n', { noindex: true }), [])
+  assert.match(robotsProblems(robots, { noindex: true }).join(' '), /must disallow every crawler/)
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\nSitemap: https://x/s.xml', { noindex: true }).join(' '), /names a Sitemap/)
+  assert.match(robotsProblems('User-agent: GPTBot\nDisallow: /\n', { noindex: true }).join(' '), /must disallow every crawler/)
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\nUser-agent: Googlebot\nAllow: /\n', { noindex: true }).join(' '), /group for googlebot doesn't disallow/)
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\nAllow: /e/\n', { noindex: true }).join(' '), /allows \/e\//)
+  // Indexed, the default, still refuses it.
+  assert.match(robotsProblems('User-agent: *\nDisallow: /\n').join(' '), /disallows every crawler/)
+})
+
+// A site served by platform's live noindex headers policy ("indexed": false): every response has X-Robots-Tag.
+function noindexSite(pages, tag = 'noindex') {
+  const serve = fakeSite(pages)
+  const fetched = []
+  const fetchImpl = async (url) => {
+    fetched.push(new URL(url).pathname)
+    return { ...(await serve(url)), headers: new Headers(tag ? { 'x-robots-tag': tag } : {}) }
+  }
+  return { fetchImpl, fetched }
+}
+
+test('live checks of a noindex site want a robots.txt that shuts crawlers out, and fetch no sitemap', async () => {
+  const closed = 'User-agent: *\nDisallow: /\n'
+  const closedBuild = built.map((f) => (f.path === 'robots.txt' ? { ...f, size: closed.length, sha256: hashes(Buffer.from(closed)).sha256 } : f))
+  const ok = noindexSite({ '/': files['index.html'], '/robots.txt': closed })
+  assert.deepEqual(await checkLiveSite({ domain, files: closedBuild, fetchImpl: ok.fetchImpl, waitMs: 0, ...quiet }), [])
+  assert.ok(!ok.fetched.some((p) => p.includes('sitemap')))
+  const open = noindexSite({ '/': files['index.html'], '/robots.txt': robots, '/sitemap-index.xml': files['sitemap-index.xml'] }, 'noindex, nofollow')
+  const problems = (await checkLiveSite({ domain, files: built, fetchImpl: open.fetchImpl, waitMs: 0, ...quiet })).join(' ')
+  assert.match(problems, /must disallow every crawler/)
+  assert.match(problems, /names a Sitemap/)
+  // Without the header the site is indexed, and a robots.txt that shuts crawlers out is refused as before.
+  const plain = noindexSite({ '/': files['index.html'], '/robots.txt': closed }, null)
+  assert.match((await checkLiveSite({ domain, files: closedBuild, fetchImpl: plain.fetchImpl, waitMs: 0, ...quiet })).join(' '), /disallows every crawler/)
+})
+
 test('the deployment payload names the commit, PR, approver and manifest', () => {
   const p = deploymentPayload({ kind: 'version', commit, pr: 12, approver: 'GilbertJames', manifestSha256: 'f'.repeat(64), workflowSha: '2'.repeat(40), domain, runUrl: 'https://run' })
   assert.deepEqual(

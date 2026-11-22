@@ -9,9 +9,17 @@
 // - every page has a non-empty <title>, and no two pages share one;
 // - no internal link has a trailing slash (`/about/`, `/about/#team`).
 // Redirect pages (a meta refresh) are skipped. Pages are served the way live serves them: /page from page/index.html.
+//
+// Noindex mode (INDEXED=false), for a site whose platform record says `"indexed": false`: a sign-in app kept out of
+// search on purpose. robots.txt must disallow every crawler from the whole site and name no sitemap, the build has no
+// sitemap*.xml, and pages need no canonical (one that is there is still checked). Titles and links are checked as
+// usual. Only platform asks for it: its app-checks.yml passes ci-site's `indexed` input from the record, through the
+// app repo's SITE_PACKAGES variable, which a PR can't change. site-checks.yml (the `sites` ruleset) always runs indexed.
 
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+
+import { notClosedToEveryCrawler } from './lib/robots.mjs'
 
 import { walkBuild } from './lib/files.mjs'
 import { runIfMain, summary } from './lib/report.mjs'
@@ -125,10 +133,11 @@ function absolute(href) {
 
 /**
  * Every problem in a build.
- * @param {{ files: Set<string>, read: (file: string) => string, siteUrl?: string }} build
+ * @param {{ files: Set<string>, read: (file: string) => string, siteUrl?: string, indexed?: boolean }} build
+ *   indexed: false for a site whose platform record says `"indexed": false` (noindex mode, at the top)
  * @returns {{ origin: string | null, pages: number, sitemapUrls: number, problems: string[] }}
  */
-export function checkBuild({ files, read, siteUrl }) {
+export function checkBuild({ files, read, siteUrl, indexed = true }) {
   const problems = []
 
   // robots.txt and the site's host.
@@ -137,9 +146,15 @@ export function checkBuild({ files, read, siteUrl }) {
   if (!files.has('robots.txt')) problems.push('robots.txt is missing')
   else {
     const robots = parseRobots(read('robots.txt'))
-    if (robots.blocksAll) problems.push('robots.txt disallows / for every crawler (a preview robots.txt must not ship)')
-    if (!robots.sitemaps.length) problems.push('robots.txt names no sitemap (add `Sitemap: https://<domain>/sitemap.xml`)')
-    for (const s of robots.sitemaps) {
+    if (!indexed) {
+      // Noindex mode: shut every crawler out (every group, not just *), and no sitemap anywhere.
+      for (const p of notClosedToEveryCrawler(read('robots.txt'))) problems.push(`${p}: it must disallow every crawler, since the site record says indexed: false`)
+      if (robots.sitemaps.length) problems.push('robots.txt names a sitemap, but the site record says indexed: false (a noindex site has no sitemap)')
+    } else {
+      if (robots.blocksAll) problems.push('robots.txt disallows / for every crawler (a preview robots.txt must not ship)')
+      if (!robots.sitemaps.length) problems.push('robots.txt names no sitemap (add `Sitemap: https://<domain>/sitemap.xml`)')
+    }
+    for (const s of indexed ? robots.sitemaps : []) {
       const u = absolute(s)
       if (!u || u.protocol !== 'https:') {
         problems.push(`robots.txt names the sitemap ${s}, which is not an absolute https URL`)
@@ -157,6 +172,11 @@ export function checkBuild({ files, read, siteUrl }) {
     if (origin && want && origin !== want) problems.push(`robots.txt's sitemap is on ${origin}, not the site's ${want}`)
     origin = want ?? origin
   }
+  if (!indexed) {
+    for (const f of [...files].filter((x) => /(^|\/)sitemap[^/]*\.xml$/.test(x)).sort()) {
+      problems.push(`${f} is in the build, but the site record says indexed: false (a noindex site has no sitemap)`)
+    }
+  }
 
   // Pages.
   const pages = new Map()
@@ -170,7 +190,7 @@ export function checkBuild({ files, read, siteUrl }) {
     else titles.set(page.title, [...(titles.get(page.title) ?? []), p])
 
     if (page.canonicals.length > 1) problems.push(`${p} has ${page.canonicals.length} canonicals; a page has one`)
-    if (page.canonicals.length === 0 && !page.noindex && !ERROR_PAGES.has(p)) problems.push(`${p} has no canonical`)
+    if (indexed && page.canonicals.length === 0 && !page.noindex && !ERROR_PAGES.has(p)) problems.push(`${p} has no canonical`)
     for (const href of page.canonicals) {
       const u = absolute(href)
       if (!u || u.protocol !== 'https:') problems.push(`${p}: the canonical ${href} is not an absolute https URL`)
@@ -233,8 +253,11 @@ async function main() {
   const list = (await walkBuild(root)).map((f) => f.path)
   const text = new Map()
   for (const f of list.filter((x) => /\.(html|xml|txt)$/.test(x))) text.set(f, await readFile(path.join(root, f), 'utf8'))
-  const result = checkBuild({ files: new Set(list), read: (f) => text.get(f) ?? '', siteUrl: process.env.SITE_URL || undefined })
-  const head = `${result.pages} pages and ${result.sitemapUrls} sitemap URLs on ${result.origin ?? 'an unknown host'}`
+  const indexed = process.env.INDEXED !== 'false'
+  const result = checkBuild({ files: new Set(list), read: (f) => text.get(f) ?? '', siteUrl: process.env.SITE_URL || undefined, indexed })
+  const head = indexed
+    ? `${result.pages} pages and ${result.sitemapUrls} sitemap URLs on ${result.origin ?? 'an unknown host'}`
+    : `${result.pages} pages in noindex mode (the site record says indexed: false) on ${result.origin ?? 'an unknown host'}`
   if (result.problems.length) {
     for (const p of result.problems.slice(0, 50)) console.log(`::error::${p}`)
     if (result.problems.length > 50) console.log(`::error::and ${result.problems.length - 50} more (see the job summary)`)
