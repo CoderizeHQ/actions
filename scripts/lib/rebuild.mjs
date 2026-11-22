@@ -87,7 +87,7 @@ export async function liveDeployment(token, repo, environment) {
   const deployments = (await gh(token, `/repos/${repo}/deployments?environment=${encodeURIComponent(environment)}&per_page=${DEPLOYMENTS_LOOKED_AT}`)) ?? []
   for (const d of deployments) {
     const [status] = (await gh(token, `/repos/${repo}/deployments/${d.id}/statuses?per_page=1`)) ?? []
-    if (status?.state === 'success') return { id: d.id, sha: d.sha, kind: payloadOf(d)?.kind ?? null }
+    if (status?.state === 'success') return { id: d.id, sha: d.sha, kind: payloadOf(d)?.kind ?? null, refreshed: Boolean(payloadOf(d)?.refresh) }
   }
   return null
 }
@@ -135,6 +135,10 @@ export async function findTarget({ token, repo, environment, refresh = false, ch
   }
   // A content rebuild never rebuilds over a refresh: it builds with no secrets, so it would publish the site without its
   // feed data (platform refuses the two fields together; this refuses it here too).
+  // Nor over a release published with its feed data (its usual kind, with a refresh payload).
+  if (!refresh && live.refreshed) {
+    return { ok: false, reasons: [`live ${short} was published with its feed data (a data refresh site's release); a content rebuild would publish it without, so it isn't rebuilt`] }
+  }
   if (!['version', 'dependency', 'content', ...(refresh ? ['refresh', 'go-live'] : [])].includes(live.kind)) {
     return { ok: false, reasons: [`live ${short}'s deployment has kind ${shown(live.kind, '(none)')}, not one release records; look before ${what === 'refresh' ? 'refreshing' : 'rebuilding'} it`] }
   }

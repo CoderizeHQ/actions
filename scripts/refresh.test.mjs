@@ -59,6 +59,10 @@ test('the target: the live commit as an approved release, a refresh or a go-live
   const content = await findTarget({ token: 't', repo, environment: 'live', ...facts({ deployment: { id: 3, sha: live, kind: 'go-live' } }) })
   assert.match(content.reasons[0], /content rebuilds start once a version release is live/)
   assert.match((await find({ deployment: { id: 1, sha: live, kind: 'manual' } })).reasons[0], /before refreshing it/)
+  // Nor over a release published with its feed data (its usual kind, with a refresh payload).
+  const withData = await findTarget({ token: 't', repo, environment: 'live', ...facts({ deployment: { id: 4, sha: live, kind: 'version', refreshed: true } }) })
+  assert.match(withData.reasons[0], /was published with its feed data/)
+  assert.equal((await find({ deployment: { id: 4, sha: live, kind: 'version', refreshed: true } })).ok, true)
   // A content rebuild never rebuilds over a refresh: it would publish the site without its feed data.
   const over = await findTarget({ token: 't', repo, environment: 'live', ...facts({ deployment: { id: 2, sha: live, kind: 'refresh' } }) })
   assert.match(over.reasons[0], /kind refresh, not one release records; look before rebuilding it/)
@@ -208,7 +212,8 @@ test('refresh-build.yml: Contents: read only, the environment it is given, secre
   // Whatever install scripts write to the environment files is discarded, and the build refused.
   const install = wf.slice(wf.indexOf('- name: Install, with no secrets'), wf.indexOf('- name: Take the named secrets'))
   assert.match(install, /pnpm install --frozen-lockfile\n\s+for f in "\$GITHUB_ENV" "\$GITHUB_PATH"; do\n\s+if \[ -s "\$f" \]; then\n\s+: > "\$f"/)
-  assert.match(wf, /\(GITHUB_\|ACTIONS_\|RUNNER_\|AWS_\|NODE_\|NPM_\|PNPM_\|COREPACK_\|PUBLIC_\|VITE_\|NEXT_PUBLIC_\)/)
+  assert.match(wf, /\(GITHUB_\|ACTIONS_\|RUNNER_\|AWS_\|NODE_\|NPM_\|PNPM_\|COREPACK_\|PUBLIC_\|VITE_\|NEXT_PUBLIC_\|BASH_FUNC_\)/)
+  assert.match(wf, /CI \| PATH \| HOME \| SHELL \| ENV \| BASH_ENV \| LD_PRELOAD \| LD_LIBRARY_PATH \| TMPDIR \| IFS \| PS4 \| PROMPT_COMMAND \| SHELLOPTS \| BASHOPTS\)/)
   assert.match(wf, /ref: \$\{\{ inputs\.commit \}\}\n\s+persist-credentials: false/)
   // secrets appear once, as the take step's environment; never in a run line, and never in install or build.
   assert.equal((wf.match(/\$\{\{ toJSON\(secrets\) \}\}/g) ?? []).length, 1)
@@ -235,6 +240,8 @@ test('deploy-preview.yml: a refresh store skips the build, takes the caller\'s a
   assert.match(build, /if: inputs\.refresh-lockfile-sha256 == ''/)
   const deploy = wf.slice(wf.indexOf('\n  deploy:'), wf.indexOf('\n  notify:'))
   assert.match(deploy, /needs\.build\.result == 'skipped' && inputs\.refresh-lockfile-sha256 != ''/)
+  // The build-and-publish path itself runs only on main: a tag only ever stores a refresh.
+  assert.match(build, /- name: Check the ref\n\s+run: \|\n\s+\[ "\$GITHUB_REF" = refs\/heads\/main \]/)
   const check = deploy.slice(deploy.indexOf('- name: Check the refresh store'), deploy.indexOf('- name: Find this workflow'))
   assert.match(check, /if: inputs\.refresh-lockfile-sha256 != ''/)
   assert.match(check, /refs\/heads\/main \|\| "\$GITHUB_REF" =~ \^refs\/tags\/v/)

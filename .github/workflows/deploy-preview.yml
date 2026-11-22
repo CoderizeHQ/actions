@@ -71,6 +71,12 @@ jobs:
         run: |
           [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
 
+      # deploy-preview builds on main only: a version tag runs it only to store a data refresh's build (the deploy job,
+      # with refresh-lockfile-sha256), never this build-and-publish path.
+      - name: Check the ref
+        run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::deploy-preview builds only on main (got $GITHUB_REF)"; exit 1; }
+
       # Only the content-rebuild dispatch may build anything but the run's own commit.
       - name: Check the content rebuild
         if: inputs.rebuild-commit != ''

@@ -97,8 +97,8 @@ jobs:
           [ "$(printf '%s\n' "${names[@]}" | sort -u | wc -l)" = "${#names[@]}" ] || fail "secret-names lists a name twice"
           for n in "${names[@]}"; do
             [[ "$n" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || fail "$n isn't a secret name"
-            [[ "$n" =~ ^(GITHUB_|ACTIONS_|RUNNER_|AWS_|NODE_|NPM_|PNPM_|COREPACK_|PUBLIC_|VITE_|NEXT_PUBLIC_) ]] && fail "$n is a name the runner, the build's tools or the pages read"
-            case "$n" in CI | PATH | HOME | SHELL | ENV | BASH_ENV | LD_PRELOAD | LD_LIBRARY_PATH | TMPDIR) fail "$n is a name the runner or the build's tools read" ;; esac
+            [[ "$n" =~ ^(GITHUB_|ACTIONS_|RUNNER_|AWS_|NODE_|NPM_|PNPM_|COREPACK_|PUBLIC_|VITE_|NEXT_PUBLIC_|BASH_FUNC_) ]] && fail "$n is a name the runner, the build's tools or the pages read"
+            case "$n" in CI | PATH | HOME | SHELL | ENV | BASH_ENV | LD_PRELOAD | LD_LIBRARY_PATH | TMPDIR | IFS | PS4 | PROMPT_COMMAND | SHELLOPTS | BASHOPTS) fail "$n is a name the runner or the build's tools read" ;; esac
           done
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -119,7 +119,9 @@ jobs:
           runtime: node@26
           install: false
 
-      # No secrets yet: install scripts never see them. They do run with this step's environment files, though, and
+      # No secrets yet, so install scripts aren't handed them (defence in depth only: they run as the same user, and the
+      # build runs dependency code with the secrets anyway; the real protection is the approved commit and its frozen
+      # lockfile). They do run with this step's environment files, though, and
       # anything they wrote there (a BASH_ENV, an LD_PRELOAD, a PATH entry) would reach the steps after this one, the
       # secrets' among them: so it is discarded, and the build refused.
       - name: Install, with no secrets
