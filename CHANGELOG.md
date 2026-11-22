@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.9.0](https://github.com/CoderizeHQ/actions/compare/v1.8.0...v1.9.0) (2026-11-22)
+
+
+### Features
+
+* let a noindex site pass the SEO and release checks ([#47](https://github.com/CoderizeHQ/actions/issues/47)) ([96fe637](https://github.com/CoderizeHQ/actions/commit/96fe637754c7411543bc31372f268266bbfb5edc))
+
 ## [1.8.0](https://github.com/CoderizeHQ/actions/compare/v1.7.1...v1.8.0) (2026-11-21)
 
 
