@@ -105,6 +105,14 @@ test("a go-live release is named as such, and says it went to the new distributi
   assert.match(ok.text, /^Release: go-live, main's head on the new distribution before its alias move \(platform's apply\)$/m)
 })
 
+test("a data refresh's email says so, with the commit it refreshed (not main's head)", () => {
+  const m = message({ ...base, workflow: 'release', ref: 'refs/heads/main', kind: 'refresh', results: 'verify=success,publish=success', siteUrl: 'https://sbmcdn.com' })
+  assert.equal(m.subject, '[CoderizeHQ] released sbmcdn-com data refresh of aaaaaaa')
+  assert.match(m.text, /^Release: data refresh, the commit live runs now built again with its feed's secrets/m)
+  const failed = message({ ...base, workflow: 'release', ref: 'refs/heads/main', kind: 'refresh', results: 'verify=failure,publish=skipped', reasons: "the refresh's build and store didn't both succeed (build=failure,store=skipped)" })
+  assert.equal(failed.subject, '[CoderizeHQ] release failed: sbmcdn-com data refresh of aaaaaaa')
+})
+
 test("a content rebuild's email says so, with the commit it rebuilt (not main's head)", () => {
   const m = message({ ...base, workflow: 'release', ref: 'refs/heads/main', kind: 'content', results: 'verify=success,publish=success', siteUrl: 'https://sbmcdn.com' })
   assert.equal(m.subject, '[CoderizeHQ] released sbmcdn-com content rebuild of aaaaaaa')

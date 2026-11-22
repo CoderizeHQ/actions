@@ -41,6 +41,14 @@ test('a live-account record with "live": true, or without the field, still gets 
   }
 })
 
+test("a site with data refreshes has its preview role trust version tags too, where its release stores its refresh", () => {
+  const [plain] = targets([{ site: 'a-com', repo: 'a-com-web', repo_id: 1, account: 'live' }])
+  const [refresh] = targets([{ site: 'b-com', repo: 'b-com-web', repo_id: 2, account: 'live', refresh: { every: '3h', secrets: ['A_B'] } }])
+  assert.deepEqual(plain.trusted.refs, ['refs/heads/main'])
+  assert.deepEqual(refresh.trusted.refs, ['refs/heads/main', 'refs/tags/v*'])
+  assert.match(differences({ ...PR_CLAIMS, repository_id: '2' }, refresh.trusted).at(-1), /not refs\/heads\/main or refs\/tags\/v\*/)
+})
+
 test("a platform PR's token differs from each role's trust in the ways the README lists", () => {
   const [preview, live, , deploy] = targets(SITES)
   assert.deepEqual(differences(PR_CLAIMS, preview.trusted), [

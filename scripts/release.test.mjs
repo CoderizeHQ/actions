@@ -41,7 +41,7 @@ const stub = (release, dependency) => ({
 test('verify: a good version tag on this commit publishes', async () => {
   const checks = stub({ ok: true, reasons: [], sha: commit, tag: 'v1.2.3', pr: 12, approver: 'GilbertJames' })
   const r = await verify({ token: 't', repo, ref: 'refs/tags/v1.2.3', sha: commit, checks })
-  assert.deepEqual(r, { publish: true, kind: 'version', pr: 12, approver: 'GilbertJames', reasons: [] })
+  assert.deepEqual(r, { publish: true, kind: 'version', refreshable: true, pr: 12, approver: 'GilbertJames', reasons: [] })
 })
 
 test('verify: a tag on a non-release commit is refused', async () => {
@@ -63,7 +63,7 @@ test('verify: a tag pointing elsewhere than the run, or a non-version tag or bra
 test('verify: main publishes a clean dependency gap, refuses a dirty one, and skips an empty one', async () => {
   const clean = stub(null, { ok: true, nothing: false, reasons: [], prs: [7, 8] })
   assert.deepEqual(await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: clean }), {
-    publish: true, kind: 'dependency', pr: null, approver: null, prs: [7, 8], reasons: [],
+    publish: true, kind: 'dependency', refreshable: true, pr: null, approver: null, prs: [7, 8], reasons: [],
   })
   const dirty = stub(null, { ok: false, nothing: false, reasons: ['#9 was not opened by Renovate'], prs: [9] })
   const r = await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: dirty })

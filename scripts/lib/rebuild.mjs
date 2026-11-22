@@ -11,6 +11,13 @@
 // 3. release.yml checks it all again (verify: the same target, found independently) and publishes that stored rebuild
 //    to the distribution already serving the site, refusing if live moved to another commit meanwhile.
 // GitHub only: no AWS here.
+//
+// Data refreshes (platform's `refresh` record field, its README "Data refreshes") reuse all of this: platform's refresh
+// check sends the repository_dispatch `data-refresh` every few hours (and after a release publishes), and the site's
+// platform-written refresh workflow finds the same target here (findTarget with `refresh`), builds it with the
+// record's named feed secrets in refresh-build.yml, stores it with deploy-preview.yml and publishes it with release.yml.
+// The one difference in the target: a refresh also takes a go-live release (an alias move under way), but only when the
+// commit it published is itself an approved release, the same check as any other.
 
 import { checkDependencyRun } from '../../release-check/dependencyCheck.mjs'
 import { checkRelease } from '../../release-check/releaseCheck.mjs'
@@ -19,6 +26,9 @@ import { gh, ghFind } from './github.mjs'
 
 /** The dispatch: its event type, and the only sender taken (the release App, which platform's content check runs as). */
 export const CONTENT_REBUILD = { action: 'content-rebuild', senders: ['coderizehq-release[bot]'] }
+
+/** A data refresh's dispatch: the release App again (platform's refresh check), with why it was sent. */
+export const DATA_REFRESH = { action: 'data-refresh', senders: ['coderizehq-release[bot]'], reasons: ['first', 'after-release', 'due'] }
 
 const VERSION_TAG = /^v\d+\.\d+\.\d+$/
 // The newest 30 deployments are plenty to find the live one: more than 30 failed publishes in a row reads as nothing
@@ -40,6 +50,22 @@ export function dispatchProblems({ ref, sender, site, payloadSite, payloadConten
   }
   if (!site || payloadSite !== site) reasons.push(`this content rebuild names ${shown(payloadSite, 'no site')}, not ${site}`)
   if (!CONTENT_SHA256.test(payloadContent ?? '')) reasons.push(`this content rebuild's content hash ${shown(payloadContent, '(none)')} isn't a SHA-256`)
+  return reasons
+}
+
+/**
+ * A data refresh's dispatch: on main, from the release App, naming this site. Its reason is only shown, and only one of
+ * the known ones.
+ * @returns {string[]} reasons to refuse
+ */
+export function refreshDispatchProblems({ ref, sender, site, payloadSite, payloadReason }) {
+  const reasons = []
+  if (ref !== 'refs/heads/main') reasons.push(`a data refresh runs only on main, not ${shown(ref)}`)
+  if (!DATA_REFRESH.senders.includes(sender)) {
+    reasons.push(`a data refresh comes only from platform's refresh check (${DATA_REFRESH.senders.join(', ')}), not ${shown(sender, 'an unknown sender')}`)
+  }
+  if (!site || payloadSite !== site) reasons.push(`this data refresh names ${shown(payloadSite, 'no site')}, not ${site}`)
+  if (!DATA_REFRESH.reasons.includes(payloadReason)) reasons.push(`this data refresh's reason ${shown(payloadReason, '(none)')} isn't one of ${DATA_REFRESH.reasons.join(', ')}`)
   return reasons
 }
 
@@ -72,32 +98,53 @@ export async function versionTagAt(token, repo, sha) {
 }
 
 /**
- * The commit a content rebuild builds and publishes: the one live runs now, re-checked by the rules that let it go
- * live. A version release must still pass release-check; a dependency-only release must still be a clean dependency
- * gap on top of the latest version release. Anything else is refused: nothing live yet, a go-live release (the first
- * publish, before the site's first version release), a commit no release names, or a deployment release didn't write.
+ * Whether a commit is one that may go live by the usual rules: a version tag on it still passing release-check, or a
+ * clean dependency-only gap on top of the latest version release.
  * @returns {Promise<{ ok: true, sha: string, basis: 'version' | 'dependency', tag: string | null, pr: number | null,
  *   approver: string | null, prs: number[] } | { ok: false, reasons: string[] }>}
  */
-export async function findTarget({ token, repo, environment, checks = { checkRelease, checkDependencyRun }, read = { liveDeployment, versionTagAt } }) {
-  const live = await read.liveDeployment(token, repo, environment)
-  if (!live) return { ok: false, reasons: [`nothing is live (no successful deployment to ${environment}), so there is nothing to rebuild`] }
-  const short = live.sha.slice(0, 7)
-  if (live.kind === 'go-live') {
-    return { ok: false, reasons: [`live ${short} is the go-live release (main's head before the alias move); content rebuilds start once a version release is live`] }
-  }
-  if (!['version', 'dependency', 'content'].includes(live.kind)) {
-    return { ok: false, reasons: [`live ${short}'s deployment has kind ${shown(live.kind, '(none)')}, not one release records; look before rebuilding it`] }
-  }
-  const tag = await read.versionTagAt(token, repo, live.sha)
+export async function approvedCommit({ token, repo, sha, what = 'live', checks = { checkRelease, checkDependencyRun }, read = { versionTagAt } }) {
+  const short = sha.slice(0, 7)
+  const tag = await read.versionTagAt(token, repo, sha)
   if (tag) {
     const r = await checks.checkRelease(token, repo, `refs/tags/${tag}`)
-    if (r.ok && r.sha === live.sha) return { ok: true, sha: live.sha, basis: 'version', tag, pr: r.pr ?? null, approver: r.approver ?? null, prs: [] }
-    return { ok: false, reasons: [...r.reasons, ...(r.sha === live.sha ? [] : [`${tag} points at ${r.sha}, not live ${live.sha}`]), `live ${short} (${tag}) no longer passes release-check`] }
+    if (r.ok && r.sha === sha) return { ok: true, sha, basis: 'version', tag, pr: r.pr ?? null, approver: r.approver ?? null, prs: [] }
+    return { ok: false, reasons: [...r.reasons, ...(r.sha === sha ? [] : [`${tag} points at ${r.sha}, not ${what} ${sha}`]), `${what} ${short} (${tag}) no longer passes release-check`] }
   }
-  const d = await checks.checkDependencyRun(token, repo, live.sha)
-  if (d.ok && !d.nothing) return { ok: true, sha: live.sha, basis: 'dependency', tag: d.base?.tag ?? null, pr: null, approver: null, prs: d.prs ?? [] }
-  return { ok: false, reasons: [...(d.reasons ?? []), `live ${short} is neither an approved version release nor a dependency-only release on top of one`] }
+  const d = await checks.checkDependencyRun(token, repo, sha)
+  if (d.ok && !d.nothing) return { ok: true, sha, basis: 'dependency', tag: d.base?.tag ?? null, pr: null, approver: null, prs: d.prs ?? [] }
+  return { ok: false, reasons: [...(d.reasons ?? []), `${what} ${short} is neither an approved version release nor a dependency-only release on top of one`] }
+}
+
+/**
+ * The commit a content rebuild (or, with `refresh`, a data refresh) builds and publishes: the one live runs now,
+ * re-checked by the rules that let it go live (approvedCommit). Anything else is refused: nothing live yet, a commit no
+ * release names, or a deployment release didn't write. A go-live release (the first publish, before an alias move) is
+ * refused for a content rebuild; a data refresh takes it, but only when its commit passes the same check, so main's
+ * head at the go-live is refreshed only if it is a released commit.
+ * @returns {Promise<{ ok: true, sha: string, basis: 'version' | 'dependency', tag: string | null, pr: number | null,
+ *   approver: string | null, prs: number[] } | { ok: false, reasons: string[] }>}
+ */
+export async function findTarget({ token, repo, environment, refresh = false, checks = { checkRelease, checkDependencyRun }, read = { liveDeployment, versionTagAt } }) {
+  const live = await read.liveDeployment(token, repo, environment)
+  const what = refresh ? 'refresh' : 'rebuild'
+  if (!live) return { ok: false, reasons: [`nothing is live (no successful deployment to ${environment}), so there is nothing to ${what}`] }
+  const short = live.sha.slice(0, 7)
+  if (live.kind === 'go-live' && !refresh) {
+    return { ok: false, reasons: [`live ${short} is the go-live release (main's head before the alias move); content rebuilds start once a version release is live`] }
+  }
+  if (!['version', 'dependency', 'content', 'refresh', ...(refresh ? ['go-live'] : [])].includes(live.kind)) {
+    return { ok: false, reasons: [`live ${short}'s deployment has kind ${shown(live.kind, '(none)')}, not one release records; look before ${what === 'refresh' ? 'refreshing' : 'rebuilding'} it`] }
+  }
+  const r = await approvedCommit({ token, repo, sha: live.sha, what: 'live', checks, read })
+  if (!r.ok && live.kind === 'go-live') return { ok: false, reasons: [...r.reasons, `live ${short} is the go-live release of main's head, which a data refresh takes only when it is a released commit`] }
+  return r
+}
+
+/** What a data refresh is, in a line. */
+export function describeRefresh({ sha, basis, tag, reason }) {
+  const what = basis === 'version' ? tag : `the dependency-only release on ${tag ?? 'the last release'}`
+  return `data refresh of ${what} (${String(sha ?? '').slice(0, 7)})${reason ? `, ${reason}` : ''}`
 }
 
 /** What a content rebuild is, in a line. */

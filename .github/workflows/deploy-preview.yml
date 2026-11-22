@@ -17,6 +17,14 @@ name: deploy-preview
 # runs now as rebuild-target.yml found it. Then `build` builds that commit instead of the run's, and `deploy` stores it
 # write-once under _builds/<site>/<commit>/rebuilds/<run id>/ for the same run's release job, and leaves the preview
 # alone (it shows main's head). Its deploy queue is its own, so a rebuild never replaces a push's waiting deploy.
+#
+# A data refresh (platform's `refresh` record field; README "Data refreshes"): the site's platform-written refresh
+# workflow (and a refresh site's release workflow) builds the commit with its feed's secrets in refresh-build.yml, then
+# calls this with `rebuild-commit` and `refresh-lockfile-sha256` (refresh-build's output). Then `build` is skipped (no
+# secrets ever reach this workflow), and `deploy` stores the run's `site-build` artifact, which refresh-build uploaded,
+# write-once under _builds/<site>/<commit>/refreshes/<run id>/ for the same run's release job, and leaves the preview
+# alone. It runs on main (the data-refresh dispatch, a weekly or go-live release) or on a version tag (a release), and
+# its queue is its own too.
 on:
   workflow_call:
     inputs:
@@ -40,12 +48,18 @@ on:
         description: A content rebuild's commit (rebuild-target.yml's output), from the site's rebuild workflow only; empty for every other run
         type: string
         default: ''
+      refresh-lockfile-sha256:
+        description: A data refresh's lockfile hash (refresh-build.yml's output); with it, store that run's refresh build instead of building
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
 jobs:
   build:
+    # A data refresh is built by refresh-build.yml, with its secrets; this workflow only stores it.
+    if: inputs.refresh-lockfile-sha256 == ''
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     outputs:
       lockfile-sha256: ${{ steps.lockfile.outputs.sha256 }}
@@ -121,17 +135,36 @@ jobs:
 
   deploy:
     needs: build
+    if: >-
+      !cancelled() && (needs.build.result == 'success' ||
+      (needs.build.result == 'skipped' && inputs.refresh-lockfile-sha256 != ''))
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     # One queue per site: a running deploy is never cancelled, and of the waiting ones the newest wins. Content rebuilds
     # queue apart: they write only their own rebuild folder, and must never replace a push's waiting deploy.
     concurrency:
-      group: deploy-preview-${{ inputs.site }}${{ inputs.rebuild-commit != '' && '-rebuild' || '' }}
+      group: deploy-preview-${{ inputs.site }}${{ inputs.refresh-lockfile-sha256 != '' && '-refresh' || inputs.rebuild-commit != '' && '-rebuild' || '' }}
       cancel-in-progress: false
     permissions:
       contents: read
       actions: read
       id-token: write
     steps:
+      # Only a data refresh's or a refresh site's release run stores a build it didn't make here: on main or a version
+      # tag, with the commit and lockfile hash refresh-build reported.
+      - name: Check the refresh store
+        if: inputs.refresh-lockfile-sha256 != ''
+        env:
+          SITE: ${{ inputs.site }}
+          COMMIT: ${{ inputs.rebuild-commit }}
+          LOCKFILE: ${{ inputs.refresh-lockfile-sha256 }}
+        run: |
+          [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::a refresh store needs rebuild-commit, a 40-character commit SHA"; exit 1; }
+          [[ "$LOCKFILE" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::refresh-lockfile-sha256 must be a SHA-256"; exit 1; }
+          [[ "$GITHUB_REF" = refs/heads/main || "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::a refresh is stored only on main or a version tag (got $GITHUB_REF)"; exit 1;
+          }
+
       # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
       # scripts from that same commit. deployPreview.mjs checks it against the OIDC token's job_workflow_sha.
       - name: Find this workflow's commit
@@ -187,10 +220,11 @@ jobs:
           REPO: ${{ github.repository }}
           COMMIT: ${{ inputs.rebuild-commit || github.sha }}
           RUN_SHA: ${{ github.sha }}
-          REBUILD_RUN: ${{ inputs.rebuild-commit != '' && github.run_id || '' }}
-          CONTENT_SHA256: ${{ inputs.rebuild-commit != '' && github.event.client_payload.content_sha256 || '' }}
+          REBUILD_RUN: ${{ inputs.rebuild-commit != '' && inputs.refresh-lockfile-sha256 == '' && github.run_id || '' }}
+          CONTENT_SHA256: ${{ inputs.rebuild-commit != '' && inputs.refresh-lockfile-sha256 == '' && github.event.client_payload.content_sha256 || '' }}
+          REFRESH_RUN: ${{ inputs.refresh-lockfile-sha256 != '' && github.run_id || '' }}
           BUILD_DIR: ${{ runner.temp }}/site-build
-          LOCKFILE_SHA256: ${{ needs.build.outputs.lockfile-sha256 }}
+          LOCKFILE_SHA256: ${{ inputs.refresh-lockfile-sha256 || needs.build.outputs.lockfile-sha256 }}
           WORKFLOW_SHA: ${{ steps.self.outputs.sha }}
           PUBLISH: ${{ steps.head.outputs.publish }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
@@ -202,7 +236,10 @@ jobs:
   # repo's main or a version tag. Its ARN is fixed here, never an input, so a site's workflow stays one `uses:` line.
   notify:
     needs: [build, deploy]
-    if: always() && contains(needs.*.result, 'failure') && github.ref == 'refs/heads/main'
+    # A refresh site's release stores its refresh on a version tag too.
+    if: >-
+      always() && contains(needs.*.result, 'failure') &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     permissions:
       contents: read

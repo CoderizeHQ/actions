@@ -11,7 +11,19 @@
 //   (lib/rebuild.mjs): the commit live runs now, found and re-checked here, built again by the same run's
 //   deploy-preview job; publish then takes that run's stored rebuild, only for a distribution already serving the
 //   site, and only while live still runs that commit;
+// - main, from the repository_dispatch `data-refresh` that platform's refresh check sends as the release App (a data
+//   refresh, platform's `refresh` record field): the same target, a go-live release's commit included when it is an
+//   approved release, built with the record's feed secrets by the same run's refresh-build job and stored by its
+//   deploy-preview job; publish takes that run's stored refresh, also to a distribution with no names yet (an alias
+//   move under way), and only while live still runs that commit;
 // - anything else is refused.
+//
+// A site with data refreshes also releases with its feed data (James, C2620 a): its platform-written release workflow
+// calls this first with `check-only` (verify alone, whose `refreshable` output says whether this run's commit may be
+// built with the secrets: a version or dependency-only release, or a go-live release of a commit that is one), then
+// refresh-build.yml and deploy-preview.yml, then this again with `refresh`, which publishes the run's stored refresh of
+// its own commit instead of the commit's first build. `refresh-results` carries how the build and store jobs ended, so
+// a failed one is refused here, and emailed, rather than skipping silently.
 //
 // `node release.mjs publish` (the release environment, as coderizehq-live-publish-<site>) then:
 // 0. finds the site's live distribution by its Comment, which platform sets to exactly the site name, and the
@@ -37,6 +49,7 @@ import {
   checkSha,
   checkSite,
   DEFAULT_MAX_DELETE_SHARE,
+  refreshRef,
   deleteGuard,
   liveBucket,
   manifestKey,
@@ -50,7 +63,17 @@ import { hashes, plainEtag } from './lib/files.mjs'
 import { notClosedToEveryCrawler } from './lib/robots.mjs'
 import { gh } from './lib/github.mjs'
 import { checkClaims, requestClaims } from './lib/oidc.mjs'
-import { CONTENT_REBUILD, describeTarget, dispatchProblems, findTarget, liveDeployment } from './lib/rebuild.mjs'
+import {
+  approvedCommit,
+  CONTENT_REBUILD,
+  DATA_REFRESH,
+  describeRefresh,
+  describeTarget,
+  dispatchProblems,
+  findTarget,
+  liveDeployment,
+  refreshDispatchProblems,
+} from './lib/rebuild.mjs'
 import { output, runIfMain, summary } from './lib/report.mjs'
 import { checkDependencyRun } from '../release-check/dependencyCheck.mjs'
 import { checkRelease } from '../release-check/releaseCheck.mjs'
@@ -70,11 +93,34 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platform[bot]'] }
 
+/** How a release run's refresh build and store jobs must end for it to publish their refresh (refresh-results). */
+export const REFRESH_RESULTS_OK = 'build=success,store=success'
+
 /**
- * @returns {Promise<{ publish: boolean, kind?: 'version' | 'dependency' | 'go-live', pr?: number | null, approver?: string | null,
- *   prs?: number[], reasons: string[] }>}
+ * The decision, then, for a site with data refreshes, what may be built with its feed secrets and what publish takes.
+ * `refresh`: the caller asks to publish this run's stored refresh (always so for a data-refresh dispatch);
+ * `refreshResults`: how its build and store jobs ended; `checkOnly`: the first, verify-only call of a refresh site's
+ * release, which wants `refreshable`. A data refresh, or a release asked to publish a refresh, is refused unless the
+ * commit may be refreshed at all (`refreshable`) and both jobs succeeded.
+ * @returns {Promise<{ publish: boolean, kind?: string, refreshable?: boolean, refresh?: boolean, pr?: number | null,
+ *   approver?: string | null, prs?: number[], reasons: string[] }>}
  */
-export async function verify({
+export async function verify(args) {
+  const r = await decide({ ...args, wantRefreshable: args.refresh === true || args.checkOnly === true })
+  if (!r.publish) return r
+  const refresh = r.kind === 'refresh' || args.refresh === true
+  if (!refresh) return r
+  const reasons = []
+  if (r.kind === 'refresh' && args.refresh !== true) reasons.push("a data refresh publishes its own refresh build: its workflow must call release with refresh: true")
+  if (!r.refreshable) reasons.push(`${r.kind} release of ${String(r.commit ?? args.sha).slice(0, 7)} isn't an approved released commit, so it can't be built with the site's feed secrets`)
+  if (args.refreshResults !== REFRESH_RESULTS_OK) {
+    reasons.push(`the refresh's build and store didn't both succeed (${String(args.refreshResults ?? '').replace(/[^\w=,-]/g, '?').slice(0, 80) || 'no results'}), so there's no refresh build to publish`)
+  }
+  if (reasons.length) return { publish: false, reasons }
+  return { ...r, refresh: true }
+}
+
+async function decide({
   token,
   repo,
   ref,
@@ -85,9 +131,30 @@ export async function verify({
   site,
   payloadSite,
   payloadContent,
+  payloadReason,
   environment = 'live',
-  checks = { checkRelease, checkDependencyRun, findTarget },
+  wantRefreshable = false,
+  checks = { checkRelease, checkDependencyRun, findTarget, approvedCommit },
 }) {
+  // A data refresh: the live commit, found again here as for a content rebuild, but a go-live release's included when it
+  // is an approved release (findTarget's refresh).
+  if (event === 'repository_dispatch' && dispatch === DATA_REFRESH.action) {
+    const reasons = refreshDispatchProblems({ ref, sender, site, payloadSite, payloadReason })
+    if (reasons.length) return { publish: false, reasons }
+    const t = await (checks.findTarget ?? findTarget)({ token, repo, environment: deploymentEnvironment(site, environment), refresh: true })
+    if (!t.ok) return { publish: false, reasons: t.reasons }
+    return {
+      publish: true,
+      kind: 'refresh',
+      refreshable: true,
+      commit: t.sha,
+      pr: t.pr,
+      approver: t.approver,
+      prs: t.prs,
+      rebuild: { basis: t.basis, tag: t.tag, reason: payloadReason },
+      reasons: [],
+    }
+  }
   // A content rebuild: the commit live runs now, found again here, never trusting the build job's word for it.
   if (event === 'repository_dispatch' && dispatch === CONTENT_REBUILD.action) {
     const reasons = dispatchProblems({ ref, sender, site, payloadSite, payloadContent })
@@ -113,20 +180,24 @@ export async function verify({
     if (!GO_LIVE.senders.includes(sender)) reasons.push(`a go-live release comes only from platform's apply (${GO_LIVE.senders.join(', ')}), not ${shown(sender, 'an unknown sender')}`)
     if (!site || payloadSite !== site) reasons.push(`this go-live release names ${shown(payloadSite, 'no site')}, not ${site}`)
     if (reasons.length) return { publish: false, reasons }
-    return { publish: true, kind: 'go-live', pr: null, approver: null, reasons: [] }
+    // main's head, with no release PR: it may be built with feed secrets only if it is itself an approved release
+    // (asked only by a refresh site's release, so no other site's go-live reads more than before).
+    if (!wantRefreshable) return { publish: true, kind: 'go-live', pr: null, approver: null, reasons: [] }
+    const approved = await (checks.approvedCommit ?? approvedCommit)({ token, repo, sha, what: "main's head", checks })
+    return { publish: true, kind: 'go-live', refreshable: approved.ok, pr: null, approver: null, reasons: [] }
   }
   if (VERSION_TAG.test(ref)) {
     const r = await checks.checkRelease(token, repo, ref)
     const reasons = [...r.reasons]
     if (r.sha !== sha) reasons.push(`the tag points at ${r.sha}, but this run is for ${sha}`)
     if (reasons.length) return { publish: false, reasons }
-    return { publish: true, kind: 'version', pr: r.pr, approver: r.approver, reasons: [] }
+    return { publish: true, kind: 'version', refreshable: true, pr: r.pr, approver: r.approver, reasons: [] }
   }
   if (ref === 'refs/heads/main') {
     const r = await checks.checkDependencyRun(token, repo, sha)
     if (r.nothing) return { publish: false, reasons: [], nothing: true }
     if (!r.ok) return { publish: false, reasons: [...r.reasons, 'dependency-only release left for James'] }
-    return { publish: true, kind: 'dependency', pr: null, approver: null, prs: r.prs, reasons: [] }
+    return { publish: true, kind: 'dependency', refreshable: true, pr: null, approver: null, prs: r.prs, reasons: [] }
   }
   return { publish: false, reasons: [`release runs only for a version tag (vX.Y.Z) or main, not ${ref}`] }
 }
@@ -325,9 +396,10 @@ export function deploymentEnvironment(site, value = 'live') {
 /**
  * The deployment record's payload: what was published, why it was allowed, and from which build. A content rebuild
  * also names its run (the stored rebuild's folder, _builds/<site>/<commit>/rebuilds/<run>/, which platform's fleet
- * report checks live against), what it rebuilt and the content hash platform sent.
+ * report checks live against), what it rebuilt and the content hash platform sent. A data refresh, or a release
+ * published with its feed data, names its refresh instead (_builds/<site>/<commit>/refreshes/<run>/).
  */
-export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl, rebuild = null }) {
+export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl, rebuild = null, refresh = null }) {
   return {
     kind,
     commit,
@@ -339,18 +411,21 @@ export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha
     site_url: `https://${domain}`,
     run: runUrl,
     ...(rebuild ? { rebuild: { run: rebuild.run, basis: rebuild.basis ?? null, tag: rebuild.tag ?? null, content_sha256: rebuild.contentSha256 ?? null } } : {}),
+    ...(refresh ? { refresh: { run: refresh.run, basis: refresh.basis ?? null, tag: refresh.tag ?? null, reason: refresh.reason ?? null } } : {}),
   }
 }
 
 /** The release kinds publish accepts. */
-export const KINDS = ['version', 'dependency', 'go-live', 'content']
+export const KINDS = ['version', 'dependency', 'go-live', 'content', 'refresh']
 
 /** What allowed a release, in a line. */
-export function describe({ kind, pr, approver, prs, commit, rebuild }) {
-  if (kind === 'version') return `release PR #${pr}, approved by ${approver}`
-  if (kind === 'go-live') return "go-live release of main's head, before the alias move"
-  if (kind === 'dependency') return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}`
+export function describe({ kind, pr, approver, prs, commit, rebuild, refresh }) {
+  const withData = refresh && kind !== 'refresh' ? `, built with its feed data (refresh ${refresh.run})` : ''
+  if (kind === 'version') return `release PR #${pr}, approved by ${approver}${withData}`
+  if (kind === 'go-live') return `go-live release of main's head, before the alias move${withData}`
+  if (kind === 'dependency') return `dependency-only: Renovate PRs ${(prs ?? []).map((n) => `#${n}`).join(', ')}${withData}`
   if (kind === 'content') return describeTarget({ sha: commit ?? '', basis: rebuild?.basis, tag: rebuild?.tag, contentSha256: rebuild?.contentSha256 })
+  if (kind === 'refresh') return describeRefresh({ sha: commit ?? '', basis: refresh?.basis ?? rebuild?.basis, tag: refresh?.tag ?? rebuild?.tag, reason: refresh?.reason ?? rebuild?.reason })
   throw new Error(`unknown release kind ${kind}`)
 }
 
@@ -367,6 +442,17 @@ export function contentRefusal(kind, { distributionId, domain, site, commit, liv
     return `live moved from ${commit.slice(0, 7)} to ${liveSha ? liveSha.slice(0, 7) : 'nothing'} since this content rebuild found its target, so it isn't published (platform's next check rebuilds the new commit if the content still differs)`
   }
   return null
+}
+
+/**
+ * A data refresh republishes the commit live runs now, also to a distribution with no names yet (an alias move under
+ * way: the feed data goes in before the names move). It is refused if live moved to another commit since it found its
+ * target, which would otherwise put older code back.
+ * @returns {string | null} the refusal
+ */
+export function refreshRefusal(kind, { commit, liveSha }) {
+  if (kind !== 'refresh' || liveSha === commit) return null
+  return `live moved from ${commit.slice(0, 7)} to ${liveSha ? liveSha.slice(0, 7) : 'nothing'} since this data refresh found its target, so it isn't published (platform's refresh check refreshes the new commit next)`
 }
 
 /**
@@ -391,11 +477,32 @@ async function verifyMain() {
     SITE: site,
     PAYLOAD_SITE: payloadSite,
     PAYLOAD_CONTENT: payloadContent,
+    PAYLOAD_REASON: payloadReason,
     DEPLOYMENT: environment,
+    REFRESH: refreshInput,
+    REFRESH_RESULTS: refreshResults,
+    CHECK_ONLY: checkOnly,
   } = process.env
   if (!token || !repo || !ref) throw new Error('GH_TOKEN, REPO and REF must be set')
-  const result = await verify({ token, repo, ref, sha: checkSha(sha), event, dispatch, sender, site, payloadSite, payloadContent, environment })
+  const result = await verify({
+    token,
+    repo,
+    ref,
+    sha: checkSha(sha),
+    event,
+    dispatch,
+    sender,
+    site,
+    payloadSite,
+    payloadContent,
+    payloadReason,
+    environment,
+    refresh: refreshInput === 'true',
+    refreshResults,
+    checkOnly: checkOnly === 'true',
+  })
   output('publish', String(result.publish))
+  output('refreshable', String(result.publish === true && result.refreshable === true))
   if (result.nothing) {
     console.log('::notice::no dependency update since the last release; nothing to publish')
     summary('No dependency update since the last release (only platform syncs, if anything); nothing published.')
@@ -418,7 +525,9 @@ async function verifyMain() {
   output('rebuild-basis', result.rebuild?.basis ?? '')
   output('rebuild-tag', result.rebuild?.tag ?? '')
   output('content-sha256', result.rebuild?.contentSha256 ?? '')
-  const why = describe({ ...result, commit })
+  output('refresh', String(result.refresh === true))
+  output('refresh-reason', DATA_REFRESH.reasons.includes(result.rebuild?.reason) ? result.rebuild.reason : '')
+  const why = describe({ ...result, commit, refresh: result.refresh ? { run: 'this run', basis: result.rebuild?.basis, tag: result.rebuild?.tag, reason: result.rebuild?.reason } : null })
   console.log(`release of ${commit} accepted (${why})`)
   summary(`### Release accepted\n\n\`${commit}\`: ${why}.`)
 }
@@ -428,17 +537,23 @@ async function publishMain() {
   const site = checkSite(env.SITE)
   const environment = deploymentEnvironment(site, env.DEPLOYMENT)
   const commit = checkSha(env.COMMIT)
-  // The run's own commit, which the OIDC token names. Only a content rebuild publishes another commit (the live one,
-  // verify's output); every other kind publishes exactly the run's.
+  // The run's own commit, which the OIDC token names. Only a content rebuild or a data refresh publishes another commit
+  // (the live one, verify's output); every other kind publishes exactly the run's.
   const runSha = checkSha(env.RUN_SHA || env.COMMIT, 'run')
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const { REPO: repo, GH_TOKEN: token } = env
   if (!KINDS.includes(env.KIND)) throw new Error(`unknown release kind ${env.KIND}`)
-  if (env.KIND !== 'content' && commit !== runSha) throw new Error(`a ${env.KIND} release publishes the run's own commit ${runSha}, not ${commit}`)
+  if (!['content', 'refresh'].includes(env.KIND) && commit !== runSha) throw new Error(`a ${env.KIND} release publishes the run's own commit ${runSha}, not ${commit}`)
   const rebuild =
     env.KIND === 'content'
       ? { run: checkRun(env.REBUILD_RUN), basis: env.REBUILD_BASIS || null, tag: env.REBUILD_TAG || null, contentSha256: env.CONTENT_SHA256 || null }
       : null
+  // A data refresh, or a release published with its feed data: this run's stored refresh (refreshes/<run>/).
+  if (env.KIND === 'refresh' && !env.REFRESH_RUN) throw new Error('a data refresh publishes its own refresh build, but REFRESH_RUN is empty')
+  const refresh = env.REFRESH_RUN
+    ? { run: checkRun(env.REFRESH_RUN), basis: env.REBUILD_BASIS || null, tag: env.REBUILD_TAG || null, reason: DATA_REFRESH.reasons.includes(env.REFRESH_REASON) ? env.REFRESH_REASON : null }
+    : null
+  const storedRef = refresh ? refreshRef(refresh.run) : (rebuild?.run ?? null)
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
 
   const problems = checkClaims(await requestClaims(), { workflow: 'release.yml', workflowSha, repo, commit: runSha })
@@ -456,6 +571,10 @@ async function publishMain() {
     const early = contentRefusal(env.KIND, { distributionId, domain, site, commit, liveSha: await liveNow() })
     if (early) throw new Error(early)
   }
+  if (env.KIND === 'refresh') {
+    const early = refreshRefusal(env.KIND, { commit, liveSha: await liveNow() })
+    if (early) throw new Error(early)
+  }
   if (!domain) console.log(`::notice::${site}: the distribution has no aliases yet (an alias move); publishing to it and checking it at https://${host}`)
   output('site-url', `https://${host}`)
 
@@ -463,6 +582,7 @@ async function publishMain() {
     kind: env.KIND,
     commit,
     rebuild,
+    refresh,
     pr: env.RELEASE_PR ? Number(env.RELEASE_PR) : null,
     approver: env.APPROVER || null,
     prs: env.DEPENDENCY_PRS ? env.DEPENDENCY_PRS.split(',').map(Number) : [],
@@ -471,7 +591,7 @@ async function publishMain() {
     runUrl: env.RUN_URL,
   }
   // The manifest first, so the deployment record names it from the start.
-  const stored = await waitForManifest({ store, site, commit, rebuild: rebuild?.run ?? null })
+  const stored = await waitForManifest({ store, site, commit, rebuild: storedRef })
   base.manifestSha256 = hashes(stored.body).sha256
   // The wait above can last 20 minutes: a go-live release asks again, right before anything is written, so names that
   // moved meanwhile stop it.
@@ -484,8 +604,12 @@ async function publishMain() {
     const late = contentRefusal(env.KIND, { distributionId, domain, site, commit, liveSha: await liveNow() })
     if (late) throw new Error(late)
   }
+  if (env.KIND === 'refresh') {
+    const late = refreshRefusal(env.KIND, { commit, liveSha: await liveNow() })
+    if (late) throw new Error(late)
+  }
 
-  const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs, commit, rebuild })
+  const what = describe({ kind: base.kind, pr: base.pr, approver: base.approver, prs: base.prs, commit, rebuild, refresh })
   const deployment = await gh(token, `/repos/${repo}/deployments`, {
     method: 'POST',
     body: {
@@ -506,7 +630,7 @@ async function publishMain() {
   await status('in_progress', 'publishing')
 
   try {
-    const result = await publishLive({ store, site, repo, commit, rebuild: rebuild?.run ?? null, distributionId, stored, maxShare })
+    const result = await publishLive({ store, site, repo, commit, rebuild: storedRef, distributionId, stored, maxShare })
     const siteProblems = await checkLiveSite({ domain, site, host, files: result.files })
     summary(
       `### Live\n\nhttps://${host}: ${result.copies} copied, ${result.deletes} deleted, ${result.unchanged} unchanged, cache cleared (${result.invalidation}).\n\n` +

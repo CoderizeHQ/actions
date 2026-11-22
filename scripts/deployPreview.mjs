@@ -10,6 +10,9 @@
 // A content rebuild (lib/rebuild.mjs; the site's platform-written rebuild workflow, with `rebuild-commit`) builds the
 // commit live runs now, not the run's own, and stores it under _builds/<site>/<commit>/rebuilds/<run>/ instead, the
 // same way (write-once, manifest last, checked). It never touches the preview: that shows main's head.
+//
+// A data refresh (platform's `refresh`; refresh-build.yml built it with the feed's secrets) is stored the same way under
+// _builds/<site>/<commit>/refreshes/<run>/, and never touches the preview either.
 
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -20,6 +23,7 @@ import {
   checkSite,
   CONTENT_SHA256,
   DEFAULT_MAX_DELETE_SHARE,
+  refreshRef,
   deleteGuard,
   makeManifest,
   manifestKey,
@@ -41,17 +45,19 @@ const PARALLEL = 8
 
 /**
  * Stores the build for `commit`, or reuses the complete one already there, then checks it against its manifest. With
- * `rebuild` ({ run, contentSha256 }), it is that content rebuild's build, stored in its own folder.
+ * `rebuild` ({ run, contentSha256 }), it is that content rebuild's build, stored in its own folder; with `refresh`
+ * ({ run }), that data refresh's.
  * @returns {Promise<{ reused: boolean, manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[] }>}
  */
-export async function storeBuild({ store, site, repo, commit, rebuild = null, buildDir, workflowSha, lockfileSha256, now = new Date(), log = console.log }) {
-  const run = rebuild?.run ?? null
+export async function storeBuild({ store, site, repo, commit, rebuild = null, refresh = null, buildDir, workflowSha, lockfileSha256, now = new Date(), log = console.log }) {
+  if (rebuild && refresh) throw new Error('a build is a content rebuild or a data refresh, not both')
+  const run = refresh ? refreshRef(refresh.run) : (rebuild?.run ?? null)
   const key = manifestKey(site, commit, run)
   let stored = await store.get(PREVIEW_BUCKET, key)
   const reused = Boolean(stored)
 
   if (stored) {
-    log(`a complete build of ${commit} is already stored${run ? ` for content rebuild ${run}` : ''}; reusing it (this run's build is not used)`)
+    log(`a complete build of ${commit} is already stored${refresh ? ` for data refresh ${refresh.run}` : run ? ` for content rebuild ${run}` : ''}; reusing it (this run's build is not used)`)
   } else {
     const local = await walkBuild(buildDir)
     log(`storing ${local.length} files under ${storedPrefix(site, commit, run)}`)
@@ -73,7 +79,7 @@ export async function storeBuild({ store, site, repo, commit, rebuild = null, bu
       }
     })
 
-    const manifest = makeManifest({ site, repo, commit, workflowSha, lockfileSha256, created: now.toISOString(), files: local, rebuild })
+    const manifest = makeManifest({ site, repo, commit, workflowSha, lockfileSha256, created: now.toISOString(), files: local, rebuild, refresh })
     const body = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)
     const result = await store.putIfAbsent(PREVIEW_BUCKET, key, body, {
       contentType: 'application/json; charset=utf-8',
@@ -127,10 +133,11 @@ async function main() {
   const env = process.env
   const site = checkSite(env.SITE)
   const commit = checkSha(env.COMMIT)
-  // The run's own commit, which the OIDC token names: the commit built, except in a content rebuild.
+  // The run's own commit, which the OIDC token names: the commit built, except in a content rebuild or a data refresh.
   const runSha = checkSha(env.RUN_SHA || env.COMMIT, 'run')
   const rebuild = env.REBUILD_RUN ? { run: checkRun(env.REBUILD_RUN), contentSha256: CONTENT_SHA256.test(env.CONTENT_SHA256 ?? '') ? env.CONTENT_SHA256 : null } : null
-  if (!rebuild && commit !== runSha) throw new Error(`deploy-preview builds the run's own commit ${runSha}, not ${commit}, except in a content rebuild`)
+  const refresh = env.REFRESH_RUN ? { run: checkRun(env.REFRESH_RUN) } : null
+  if (!rebuild && !refresh && commit !== runSha) throw new Error(`deploy-preview builds the run's own commit ${runSha}, not ${commit}, except in a content rebuild or a data refresh`)
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
   const repo = env.REPO
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
@@ -147,6 +154,7 @@ async function main() {
     repo,
     commit,
     rebuild,
+    refresh,
     buildDir: env.BUILD_DIR,
     workflowSha,
     lockfileSha256: env.LOCKFILE_SHA256,
@@ -154,10 +162,15 @@ async function main() {
   output('manifest-sha256', stored.manifestSha256)
   const how = stored.reused ? 'Reused' : 'Stored'
   summary(
-    `### Stored build\n\n${how} \`${storedPrefix(site, commit, rebuild?.run ?? null)}\`: ${stored.files.length} files, ` +
+    `### Stored build\n\n${how} \`${storedPrefix(site, commit, refresh ? refreshRef(refresh.run) : (rebuild?.run ?? null))}\`: ${stored.files.length} files, ` +
       `manifest SHA-256 \`${stored.manifestSha256}\`.`,
   )
 
+  if (refresh) {
+    console.log(`::notice::data refresh of ${commit} stored for release; the preview shows main's head, built with no secrets, and is left alone`)
+    summary("Preview not updated: this is a data refresh, and the preview shows main's head, built with no secrets.")
+    return
+  }
   if (rebuild) {
     console.log(`::notice::content rebuild of ${commit} stored for release; the preview shows main's head and is left alone`)
     summary("Preview not updated: this is a content rebuild of the live commit, and the preview shows main's head.")

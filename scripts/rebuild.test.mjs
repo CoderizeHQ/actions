@@ -127,11 +127,11 @@ test("deploy-preview.yml: rebuild-commit only for the content-rebuild dispatch o
   // The check runs before the checkout, and the checkout (before anything from the site) takes the rebuild commit.
   assert.ok(check.indexOf('Check the content rebuild') < check.indexOf('actions/checkout'))
   assert.match(check, /ref: \$\{\{ inputs\.rebuild-commit \|\| github\.sha \}\}/)
-  assert.match(wf, /group: deploy-preview-\$\{\{ inputs\.site \}\}\$\{\{ inputs\.rebuild-commit != '' && '-rebuild' \|\| '' \}\}/)
+  assert.match(wf, /group: deploy-preview-\$\{\{ inputs\.site \}\}\$\{\{ inputs\.refresh-lockfile-sha256 != '' && '-refresh' \|\| inputs\.rebuild-commit != '' && '-rebuild' \|\| '' \}\}/)
   const store = wf.slice(wf.indexOf('- name: Store the build and publish the preview'))
   assert.match(store, /COMMIT: \$\{\{ inputs\.rebuild-commit \|\| github\.sha \}\}/)
   assert.match(store, /RUN_SHA: \$\{\{ github\.sha \}\}/)
-  assert.match(store, /REBUILD_RUN: \$\{\{ inputs\.rebuild-commit != '' && github\.run_id \|\| '' \}\}/)
+  assert.match(store, /REBUILD_RUN: \$\{\{ inputs\.rebuild-commit != '' && inputs\.refresh-lockfile-sha256 == '' && github\.run_id \|\| '' \}\}/)
   // The build job still asks for nothing: existing callers grant it nothing more.
   const build = wf.slice(wf.indexOf('\n  build:'), wf.indexOf('\n  deploy:'))
   assert.doesNotMatch(build, /permissions:/)

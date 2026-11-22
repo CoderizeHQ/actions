@@ -1,0 +1,159 @@
+name: refresh-build
+
+# The build of a data refresh (platform's `refresh` record field; README "Data refreshes"): the only job a site's feed
+# secrets ever reach. A site whose build bakes in data from a feed that needs credentials (an MLS feed under Realcomp's
+# 12-hour rule) gets a platform-written refresh workflow, and a release workflow that releases with the data:
+#   target or check: rebuild-target.yml, or release.yml with check-only: the commit, an approved released one
+#   build:  uses: CoderizeHQ/actions/.github/workflows/refresh-build.yml@v1
+#           with: { site, package, commit, environment: refresh (or refresh-<site>), secret-names: A,B }
+#           secrets: inherit
+#   store:  deploy-preview.yml with rebuild-commit and refresh-lockfile-sha256 (stores this job's artifact)
+#   release: release.yml with refresh: true
+# An environment's secrets reach only a job that names the environment, and the calling job can't name one, so the
+# caller passes them with `secrets: inherit` and this job names the environment. Of everything inherit makes available,
+# only the record's names are read (each from secrets[name]), and only the build step gets them: `pnpm install` runs
+# before they are set. The job asks for nothing but Contents: read: no id-token, so no AWS role can trust it, and it
+# stores nothing; deploy-preview's store job, which gets no secrets, stores what it built. It emails nobody itself:
+# the caller's release job runs whatever this ended as, and refuses (and emails ops@) when it failed.
+on:
+  workflow_call:
+    inputs:
+      site:
+        description: The site's name (its domain with dots as hyphens, as in platform/sites/<site>.json)
+        type: string
+        required: true
+      package:
+        description: The site's pnpm package as a path (./apps/web), for a site in an app repo; empty for the repo root
+        type: string
+        default: ''
+      build-dir:
+        description: Where the build writes the site (inside the package, when there is one)
+        type: string
+        default: dist
+      commit:
+        description: The commit to build, as the caller's target or release check found it (an approved released commit)
+        type: string
+        required: true
+      environment:
+        description: The site's refresh environment, refresh (a site repo) or refresh-<site> (a package site)
+        type: string
+        required: true
+      secret-names:
+        description: The record's refresh.secrets, comma-separated; only these reach the build step
+        type: string
+        required: true
+    outputs:
+      lockfile-sha256:
+        description: The SHA-256 of the commit's pnpm-lock.yaml, for deploy-preview's manifest
+        value: ${{ jobs.build.outputs.lockfile-sha256 }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    outputs:
+      lockfile-sha256: ${{ steps.lockfile.outputs.sha256 }}
+    steps:
+      # Everything is checked before anything from the site runs. The names follow platform's rules for the record
+      # (scripts/lib/records.mjs refreshSecretProblems), checked again here because this is where they become
+      # environment variables: none the runner or the build's tools read, none a framework would publish.
+      - name: Check the refresh
+        env:
+          SITE: ${{ inputs.site }}
+          PACKAGE: ${{ inputs.package }}
+          COMMIT: ${{ inputs.commit }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          NAMES: ${{ inputs.secret-names }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH: ${{ github.event.action }}
+          SENDER: ${{ github.event.sender.login }}
+          PAYLOAD_SITE: ${{ github.event.client_payload.site }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || fail "site must be 1 to 38 of a-z, 0-9 and -"
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || fail "commit must be a 40-character commit SHA"
+          if [ -z "$PACKAGE" ]; then want=refresh; else want="refresh-$SITE"; fi
+          [ "$ENVIRONMENT" = "$want" ] || fail "the refresh environment is $want, not $ENVIRONMENT"
+          [[ "$GITHUB_REF" = refs/heads/main || "$GITHUB_REF" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "a refresh builds only on main or a version tag (got $GITHUB_REF)"
+          if [ "$EVENT" = repository_dispatch ] && [ "$DISPATCH" = data-refresh ]; then
+            [ "$SENDER" = 'coderizehq-release[bot]' ] || fail "a data refresh comes only from platform's refresh check"
+            [ "$PAYLOAD_SITE" = "$SITE" ] || fail "this data refresh names another site"
+          fi
+          IFS=, read -ra names <<<"$NAMES"
+          [ "${#names[@]}" -ge 1 ] && [ "${#names[@]}" -le 5 ] || fail "secret-names lists 1 to 5 names"
+          [ "$(printf '%s\n' "${names[@]}" | sort -u | wc -l)" = "${#names[@]}" ] || fail "secret-names lists a name twice"
+          for n in "${names[@]}"; do
+            [[ "$n" =~ ^[A-Z][A-Z0-9_]{0,63}$ ]] || fail "$n isn't a secret name"
+            [[ "$n" =~ ^(GITHUB_|ACTIONS_|RUNNER_|AWS_|NODE_|NPM_|PNPM_|COREPACK_|PUBLIC_|VITE_|NEXT_PUBLIC_) ]] && fail "$n is a name the runner, the build's tools or the pages read"
+            case "$n" in CI | PATH | HOME | SHELL | ENV | BASH_ENV | LD_PRELOAD | LD_LIBRARY_PATH | TMPDIR) fail "$n is a name the runner or the build's tools read" ;; esac
+          done
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+
+      # Before anything from the site runs, so the manifest's lockfile hash is the committed file's.
+      - name: Hash the lockfile
+        id: lockfile
+        run: |
+          [ -f pnpm-lock.yaml ] || { echo "::error::pnpm-lock.yaml is missing"; exit 1; }
+          echo "sha256=$(sha256sum pnpm-lock.yaml | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
+        with:
+          runtime: node@26
+          install: false
+
+      # No secrets yet: install scripts never see them.
+      - run: pnpm install --frozen-lockfile
+
+      # The named secrets alone, from what the caller passed, into this job's environment for the steps after this one
+      # (the build, then the upload). ALL is this step's only, and nothing here prints a value: GitHub masks each one.
+      - name: Take the named secrets
+        env:
+          ALL: ${{ toJSON(secrets) }}
+          NAMES: ${{ inputs.secret-names }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          IFS=, read -ra names <<<"$NAMES"
+          for n in "${names[@]}"; do
+            v=$(jq -r --arg n "$n" '.[$n] // ""' <<<"$ALL")
+            [ -n "$v" ] || { echo "::error::$n isn't set in the $ENVIRONMENT environment (James types it in)"; exit 1; }
+            delim="REFRESH_$(openssl rand -hex 16)"
+            { echo "$n<<$delim"; printf '%s\n' "$v"; echo "$delim"; } >> "$GITHUB_ENV"
+          done
+          unset ALL
+
+      - name: Build with the feed's data
+        id: build
+        env:
+          PACKAGE: ${{ inputs.package }}
+          BUILD_DIR: ${{ inputs.build-dir }}
+        run: |
+          # As deploy-preview builds: no package, the repo root; a package, exactly that one pnpm package.
+          if [ -z "$PACKAGE" ]; then
+            pnpm run build
+            echo "dir=$BUILD_DIR" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          [[ "$PACKAGE" =~ ^\./[A-Za-z0-9_-][A-Za-z0-9_./-]*$ && "$PACKAGE" != *..* && "$PACKAGE" != */ ]] || { echo "::error::package is a path to one pnpm package in the repo (./apps/web)"; exit 1; }
+          matches=$(pnpm --filter "$PACKAGE" list --depth -1 --json | node -e 'let s="";process.stdin.on("data",(d)=>(s+=d)).on("end",()=>console.log(JSON.parse(s).length))')
+          [ "$matches" = 1 ] || { echo "::error::package $PACKAGE matches $matches packages, not one"; exit 1; }
+          pnpm --filter "$PACKAGE" run build
+          echo "dir=${PACKAGE#./}/$BUILD_DIR" >> "$GITHUB_OUTPUT"
+
+      # The same artifact name deploy-preview's own build uploads, which its store job takes.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: site-build
+          path: ${{ steps.build.outputs.dir }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1

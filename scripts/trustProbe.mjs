@@ -3,7 +3,8 @@
 // platform pull request, it takes the job's own GitHub OIDC token and calls sts:AssumeRoleWithWebIdentity on every
 // role that token must never reach:
 // - coderizehq-preview-deploy-<site>, each site: another repository (platform, not the site's), another workflow
-//   file (ci-tofu.yml, not deploy-preview.yml), and a pull-request ref, not main;
+//   file (ci-tofu.yml, not deploy-preview.yml), and a pull-request ref, not main (nor, for a site with data refreshes,
+//   whose release stores its refresh, a version tag);
 // - coderizehq-live-publish-<site>, each live site: another repository and workflow file (not release.yml), not the
 //   release environment, and a pull-request ref, not a version tag or main;
 // - coderizehq-infra-deploy, each account: the right repository, but another workflow file (actions' ci-tofu.yml,
@@ -37,7 +38,7 @@ const arn = (account, role) => `arn:aws:iam::${account}:role/${role}`
 
 /**
  * The roles to try, each with the claims its trust policy accepts (the site contract's table).
- * @param {{ site: string, repo: string, repo_id: number, account: string, live?: boolean }[]} sites
+ * @param {{ site: string, repo: string, repo_id: number, account: string, live?: boolean, refresh?: object }[]} sites
  */
 export function targets(sites) {
   const list = []
@@ -45,7 +46,14 @@ export function targets(sites) {
     list.push({
       role: `coderizehq-preview-deploy-${s.site}`,
       account: PREVIEW_ACCOUNT,
-      trusted: { repo: s.repo, repositoryId: String(s.repo_id), workflows: version('deploy-preview.yml'), refs: ['refs/heads/main'], environment: null },
+      // A site with data refreshes (platform's "refresh") stores its release's refresh from a version tag too.
+      trusted: {
+        repo: s.repo,
+        repositoryId: String(s.repo_id),
+        workflows: version('deploy-preview.yml'),
+        refs: s.refresh ? ['refs/heads/main', 'refs/tags/v*'] : ['refs/heads/main'],
+        environment: null,
+      },
     })
     // A preview-only record ("live": false, platform README "Sites") has no live publish role until its go-live, so
     // there's nothing to refuse: probing it would fail as a missing role.
