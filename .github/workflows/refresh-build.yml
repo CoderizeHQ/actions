@@ -88,6 +88,9 @@ jobs:
           if [ "$EVENT" = repository_dispatch ] && [ "$DISPATCH" = data-refresh ]; then
             [ "$SENDER" = 'coderizehq-release[bot]' ] || fail "a data refresh comes only from platform's refresh check"
             [ "$PAYLOAD_SITE" = "$SITE" ] || fail "this data refresh names another site"
+          else
+            # A release builds its own commit (the one release.yml's check approved), never another.
+            [ "$COMMIT" = "$GITHUB_SHA" ] || fail "outside a data-refresh dispatch, a refresh builds the run's own commit $GITHUB_SHA, not $COMMIT"
           fi
           IFS=, read -ra names <<<"$NAMES"
           [ "${#names[@]}" -ge 1 ] && [ "${#names[@]}" -le 5 ] || fail "secret-names lists 1 to 5 names"
@@ -116,8 +119,19 @@ jobs:
           runtime: node@26
           install: false
 
-      # No secrets yet: install scripts never see them.
-      - run: pnpm install --frozen-lockfile
+      # No secrets yet: install scripts never see them. They do run with this step's environment files, though, and
+      # anything they wrote there (a BASH_ENV, an LD_PRELOAD, a PATH entry) would reach the steps after this one, the
+      # secrets' among them: so it is discarded, and the build refused.
+      - name: Install, with no secrets
+        run: |
+          pnpm install --frozen-lockfile
+          for f in "$GITHUB_ENV" "$GITHUB_PATH"; do
+            if [ -s "$f" ]; then
+              : > "$f"
+              echo "::error::pnpm install wrote to the job's environment files; refusing to build with the feed's secrets"
+              exit 1
+            fi
+          done
 
       # The named secrets alone, from what the caller passed, into a file only the build step reads (NUL-separated
       # NAME=value pairs, readable by the runner's user only). ALL is this step's only, and nothing here prints a value:

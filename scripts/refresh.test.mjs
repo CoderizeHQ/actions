@@ -198,11 +198,16 @@ test('refresh-build.yml: Contents: read only, the environment it is given, secre
   assert.match(wf, /environment: \$\{\{ inputs\.environment \}\}\n\s+permissions:\n\s+contents: read\n/)
   assert.match(wf, /value: \$\{\{ jobs\.build\.outputs\.lockfile-sha256 \}\}/)
   // The checks come first; the environment must be refresh or refresh-<site>, matching the package.
-  const order = ['- name: Check the refresh', 'actions/checkout@', '- name: Hash the lockfile', 'pnpm install --frozen-lockfile', '- name: Take the named secrets', '- name: Build with the feed', 'actions/upload-artifact@']
+  const order = ['- name: Check the refresh', 'actions/checkout@', '- name: Hash the lockfile', '- name: Install, with no secrets', '- name: Take the named secrets', '- name: Build with the feed', 'actions/upload-artifact@']
   const at = order.map((s) => wf.indexOf(s))
   assert.deepEqual([...at].sort((a, b) => a - b), at, 'steps in order')
   assert.ok(at.every((i) => i > 0))
   assert.match(wf, /if \[ -z "\$PACKAGE" \]; then want=refresh; else want="refresh-\$SITE"; fi/)
+  // A release builds its own commit; only a data-refresh dispatch builds the live one rebuild-target found.
+  assert.match(wf, /\[ "\$COMMIT" = "\$GITHUB_SHA" \] \|\| fail/)
+  // Whatever install scripts write to the environment files is discarded, and the build refused.
+  const install = wf.slice(wf.indexOf('- name: Install, with no secrets'), wf.indexOf('- name: Take the named secrets'))
+  assert.match(install, /pnpm install --frozen-lockfile\n\s+for f in "\$GITHUB_ENV" "\$GITHUB_PATH"; do\n\s+if \[ -s "\$f" \]; then\n\s+: > "\$f"/)
   assert.match(wf, /\(GITHUB_\|ACTIONS_\|RUNNER_\|AWS_\|NODE_\|NPM_\|PNPM_\|COREPACK_\|PUBLIC_\|VITE_\|NEXT_PUBLIC_\)/)
   assert.match(wf, /ref: \$\{\{ inputs\.commit \}\}\n\s+persist-credentials: false/)
   // secrets appear once, as the take step's environment; never in a run line, and never in install or build.
@@ -211,7 +216,8 @@ test('refresh-build.yml: Contents: read only, the environment it is given, secre
   const take = wf.slice(wf.indexOf('- name: Take the named secrets'), wf.indexOf('- name: Build with the feed'))
   assert.match(take, /ALL: \$\{\{ toJSON\(secrets\) \}\}/)
   // Into a file only the build step reads and deletes, never $GITHUB_ENV (which every later step, the upload too, gets).
-  assert.doesNotMatch(code, /GITHUB_ENV/)
+  assert.doesNotMatch(code, />>\s*"\$GITHUB_ENV"/)
+  assert.doesNotMatch(take, /GITHUB_ENV/)
   assert.match(take, /umask 077\n\s+file="\$RUNNER_TEMP\/refresh-secrets"/)
   const buildStep = wf.slice(wf.indexOf('- name: Build with the feed'), wf.indexOf('actions/upload-artifact@'))
   assert.match(buildStep, /while IFS= read -r -d '' pair; do export "\$pair"; done < "\$file"\n\s+rm -f "\$file"/)
@@ -250,6 +256,10 @@ test('release.yml: check-only, refresh and refresh-results, its outputs, and the
   }
   const publish = wf.slice(wf.indexOf('\n  publish:'), wf.indexOf('\n  notify:'))
   assert.match(publish, /if: needs\.verify\.outputs\.publish == 'true' && !inputs\.check-only/)
+  // A check-only call that passes emails nobody: notify sends on a published release or a failure, and check-only
+  // never publishes.
+  const notify = wf.slice(wf.indexOf('\n  notify:'))
+  assert.match(notify, /\(needs\.publish\.result == 'success' \|\| contains\(needs\.\*\.result, 'failure'\)\)/)
   assert.match(publish, /REFRESH_RUN: \$\{\{ needs\.verify\.outputs\.refresh == 'true' && github\.run_id \|\| '' \}\}/)
   assert.doesNotMatch(wf, /secrets\.(?!RELEASE)/)
   const rt = await workflow('rebuild-target.yml')

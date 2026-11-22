@@ -258,7 +258,9 @@ platform-written refresh workflow (`refresh.yml`, or `refresh-<site>.yml` in an 
    build's tools read, none a framework inlines into pages), checks out the commit, hashes the lockfile, runs
    `pnpm install` with no secrets, then takes only the named secrets (a missing one fails here) into a file only the
    build step reads and deletes (never `$GITHUB_ENV`, so the upload never sees them), builds and uploads `site-build`.
-   `build-dir` must be a plain folder name. It has Contents: read only: no `id-token`, so no AWS role can trust it.
+   `build-dir` must be a relative folder inside the package, with no `..`. Anything `pnpm install` writes to the job's
+   environment files is discarded and the build refused, so install scripts can't reach the steps that hold secrets.
+   Outside a `data-refresh` dispatch, `commit` must be the run's own commit. It has Contents: read only: no `id-token`, so no AWS role can trust it.
 3. `deploy-preview.yml` with `rebuild-commit` and `refresh-lockfile-sha256`: skips its own build, stores the run's
    `site-build` write-once at `_builds/<site>/<commit>/refreshes/<run>/` (its manifest says `refresh: { run }`), and
    leaves the preview alone. No secret reaches it.
