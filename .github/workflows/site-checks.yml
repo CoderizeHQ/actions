@@ -7,7 +7,7 @@ name: site-checks
 # "axe / axe". Site repos have no ci.yml of their own.
 #
 # A ruleset workflow takes no inputs, so ci-site and axe run with their defaults (the build in dist/, at least one
-# page; axe also fails on any sitemap URL with no built page).
+# page; axe samples 3 pages of each big family from one template, and fails on any sitemap URL with no built page).
 on:
   pull_request:
 
@@ -24,8 +24,9 @@ jobs:
       contents: read
       actions: read
 
-  # Every built page in light and dark color schemes (WCAG 2.2 AA, target size included). `actions: read` lets both
-  # find which commit of their workflow the run uses and load their scripts from it.
+  # The built pages (big families from one template sampled, 3 each) in light and dark color schemes (WCAG 2.2 AA,
+  # target size included). `actions: read` lets both find which commit of their workflow the run uses and load their
+  # scripts from it.
   axe:
     if: github.repository != 'CoderizeHQ/actions'
     uses: CoderizeHQ/actions/.github/workflows/axe.yml@v1

@@ -53,7 +53,7 @@ required workflow that isn't there blocks every PR it covers.
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `indexed` (`true`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
-| `axe.yml` | `site-checks.yml` | `build-dir` (`dist`), `min-pages` (1) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
+| `axe.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `min-pages` (1), `pages-per-template` (3; 0 scans every page) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild workflow only) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main; a site's rebuild workflow | `site`, `max-delete-share` (`0.25`), `deployment` (`live`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
 | `rebuild-target.yml` | a site's rebuild workflow (Content rebuilds) | `site`, `deployment` (`live`); output `commit` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: read` | None: no AWS, no writes. Finds the commit a content rebuild builds |
@@ -305,9 +305,20 @@ with every plan, updated on each push.
 ### axe
 
 Builds the site, serves the build the way live does (`/page` from `/page/index.html`, a missing page answers
-`/404.html` with 404), and runs axe (Playwright and `@axe-core/playwright`, pinned in `pnpm-lock.yaml`) on every built
-page in light and dark color schemes after the network is idle, against WCAG 2.2 AA with `target-size` enabled. It fails
+`/404.html` with 404), and runs axe (Playwright and `@axe-core/playwright`, pinned in `pnpm-lock.yaml`) on its pages
+in light and dark color schemes after the network is idle, against WCAG 2.2 AA with `target-size` enabled. It fails
 on any violation, a page that doesn't answer 200, fewer pages than `min-pages`, or a sitemap URL with no built page.
+
+Pages built from one template give the same violations, so a big family of them is sampled
+(`scripts/axeScan.mjs`, `templateKeys` and `samplePages`). The family comes from the shape of the paths: a path
+segment after the first is a slug when more than 10 different values (or `pages-per-template`, if higher) sit at
+that place under the same parent. So 300 `/events/<slug>` pages are one family, `/events/*`; with more than 10
+chapters, `/chapters/<c>/events/<slug>` is one family across every chapter, and `/chapters/<c>/contact` another. A
+top-level page (`/about`) and a handful of siblings (`/legal/privacy`, `/legal/terms`) are never a family: each is
+scanned. From a family of more than `pages-per-template` pages (3 by default), that many are scanned, sorted and
+spread evenly from the first to the last, so every run scans the same pages; `0` scans every page. `min-pages` and
+the sitemap check still count every built page, since they read the build's files, not the browser. The job summary
+says how many pages were built and how many scanned, with a row per sampled family.
 
 ## Other pieces
 
