@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/CoderizeHQ/actions/compare/v1.9.0...v1.10.0) (2026-11-22)
+
+
+### Features
+
+* scan a sample of each big family of template pages in axe ([#53](https://github.com/CoderizeHQ/actions/issues/53)) ([52e069e](https://github.com/CoderizeHQ/actions/commit/52e069e8d95d6d205995071a12368bab3705d575))
+
 ## [1.9.0](https://github.com/CoderizeHQ/actions/compare/v1.8.0...v1.9.0) (2026-11-22)
 
 
