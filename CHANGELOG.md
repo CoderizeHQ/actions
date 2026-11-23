@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/CoderizeHQ/actions/compare/v1.11.0...v1.12.0) (2026-11-23)
+
+
+### Features
+
+* publish government sites from the Government account, never deleting there ([#57](https://github.com/CoderizeHQ/actions/issues/57)) ([6c09bc3](https://github.com/CoderizeHQ/actions/commit/6c09bc36be6dc10ebc4001326b41942db06b8bd9))
+
 ## [1.11.0](https://github.com/CoderizeHQ/actions/compare/v1.10.0...v1.11.0) (2026-11-23)
 
 
