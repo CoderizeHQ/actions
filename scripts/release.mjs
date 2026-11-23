@@ -43,19 +43,34 @@
 //    and name no sitemap (robotsProblems' `noindex`), and no sitemap is fetched;
 // 6. records it all as a GitHub deployment to `live`, created once the manifest is read (its payload names the commit,
 //    the release PR, the approver and the manifest hash) and marked successful or failed at the end.
+//
+// A government site (ACCOUNT=government, the workflow's `account` input, which platform writes for a government
+// record) is published the same way from its builds in the Government account's locked bucket, as that account's
+// coderizehq-live-publish-<site>, into its own locked coderizehq-live-<site>, with one difference: nothing is ever
+// deleted from live (lib/build.mjs, "Never delete"). In step 3 a file the build no longer has stays on live, and a page
+// it no longer has stops the release before anything is written, unless the site's redirect map (platform's redirect
+// sync writes the record's `redirects` into the government redirect store, which this reads) sends the page's URL
+// elsewhere. Step 4 then allows exactly those kept objects beside the build. Copies there ask S3 for a SHA-256
+// checksum, as a locked bucket's uploads need one.
 
 import {
+  ACCOUNTS,
+  buildsBucket,
+  checkAccount,
   checkRun,
   checkSha,
   checkSite,
   DEFAULT_MAX_DELETE_SHARE,
+  GOVERNMENT_REDIRECT_STORE,
+  isPage,
   refreshRef,
   deleteGuard,
   liveBucket,
   manifestKey,
+  neverDeletePlan,
+  pageUrl,
   planSync,
   pool,
-  PREVIEW_BUCKET,
   readManifest,
   storedKey,
 } from './lib/build.mjs'
@@ -203,11 +218,12 @@ async function decide({
 }
 
 /** Reads the stored manifest, waiting for deploy-preview to store the commit's build. */
-export async function waitForManifest({ store, site, commit, rebuild = null, waitMs = 20 * 60_000, pollMs = 30_000, log = console.log }) {
+export async function waitForManifest({ store, site, commit, rebuild = null, account = 'live', waitMs = 20 * 60_000, pollMs = 30_000, log = console.log }) {
   const key = manifestKey(site, commit, rebuild)
+  const bucket = buildsBucket(account)
   const until = Date.now() + waitMs
   for (;;) {
-    const got = await store.get(PREVIEW_BUCKET, key)
+    const got = await store.get(bucket, key)
     if (got) return got
     if (Date.now() >= until) throw new Error(`no stored build for ${commit} (${key}); has deploy-preview run for it?`)
     log(`waiting for deploy-preview to store ${commit}…`)
@@ -216,18 +232,35 @@ export async function waitForManifest({ store, site, commit, rebuild = null, wai
 }
 
 /**
- * Steps 1 to 5 above.
- * @returns {Promise<{ manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[],
- *   copies: number, deletes: number, unchanged: number, invalidation: string }>}
+ * A never-delete release's refusal: the pages live has that the build doesn't, with no redirect.
+ * @returns {string}
  */
-export async function publishLive({ store, site, repo, commit, rebuild = null, distributionId, stored, maxShare = DEFAULT_MAX_DELETE_SHARE, waitMs, pollMs, log = console.log }) {
-  stored ??= await waitForManifest({ store, site, commit, rebuild, waitMs, pollMs, log })
+export function neverDeleteRefusal(site, refused) {
+  const shown = refused.slice(0, 20).map((k) => `${pageUrl(k)} (${k})`)
+  const more = refused.length > shown.length ? `\n…and ${refused.length - shown.length} more` : ''
+  return (
+    `${site} is a government site, whose releases never delete a page, but this build lacks ${refused.length} ` +
+    `page${refused.length === 1 ? '' : 's'} live now with no redirect in its record:\n${shown.join('\n')}${more}\n` +
+    "Nothing was published. Put the page back in the build, or add a redirect for its URL to the record's redirects " +
+    '(platform sites/<site>.json) and apply it, then release again.'
+  )
+}
+
+/**
+ * Steps 1 to 5 above. `account` is the site's (lib/build.mjs ACCOUNTS): where its builds are read from, and whether
+ * live never deletes (a government site: `kept` lists what stayed on live that the build doesn't have).
+ * @returns {Promise<{ manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[],
+ *   copies: number, deletes: number, unchanged: number, invalidation: string, kept?: string[], redirected?: string[] }>}
+ */
+export async function publishLive({ store, site, repo, commit, rebuild = null, account = 'live', distributionId, stored, maxShare = DEFAULT_MAX_DELETE_SHARE, waitMs, pollMs, log = console.log }) {
+  const { builds, neverDelete } = ACCOUNTS[checkAccount(account)]
+  stored ??= await waitForManifest({ store, site, commit, rebuild, account, waitMs, pollMs, log })
   const manifestSha256 = hashes(stored.body).sha256
   const manifest = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit, rebuild })
 
   // The bytes themselves, not S3's word for them: this is what goes live.
   const files = await pool(manifest, PARALLEL, async (f) => {
-    const obj = await store.get(PREVIEW_BUCKET, storedKey(site, commit, f.path, rebuild))
+    const obj = await store.get(builds, storedKey(site, commit, f.path, rebuild))
     if (!obj) throw new Error(`stored build is missing ${f.path}`)
     const h = hashes(obj.body)
     if (h.size !== f.size || h.sha256 !== f.sha256) throw new Error(`stored ${f.path} doesn't match the manifest`)
@@ -239,10 +272,28 @@ export async function publishLive({ store, site, repo, commit, rebuild = null, d
   const bucket = liveBucket(site)
   const current = (await store.list(bucket, '')).map((c) => ({ key: c.key, etag: plainEtag(c.etag) }))
   const plan = planSync(files, current)
-  const refusal = deleteGuard({ current: current.length, deletes: plan.deletes.length, maxShare })
-  if (refusal) throw new Error(refusal)
 
-  await pool(plan.copies, PARALLEL, (file) => store.copy(PREVIEW_BUCKET, storedKey(site, commit, file, rebuild), bucket, file))
+  // Never delete: what the build no longer has stays on live, and a dropped page needs a redirect, read from the
+  // account's redirect store only when a page is dropped. Refused before anything is written.
+  let kept = null
+  if (neverDelete) {
+    const dropped = plan.deletes
+    const redirects = dropped.some(isPage) ? await store.redirects(GOVERNMENT_REDIRECT_STORE, site) : null
+    const never = neverDeletePlan(dropped, redirects)
+    if (never.refused.length) throw new Error(neverDeleteRefusal(site, never.refused))
+    kept = never
+    plan.deletes = []
+    if (dropped.length) {
+      log(`never delete: ${dropped.length} on live but not in the build stay (${never.redirected.length} redirected pages, ${dropped.length - never.redirected.length} files)`)
+    }
+  } else {
+    const refusal = deleteGuard({ current: current.length, deletes: plan.deletes.length, maxShare })
+    if (refusal) throw new Error(refusal)
+  }
+
+  // A locked bucket's writes carry a checksum: copies into one ask S3 for the copy's SHA-256.
+  const copyOptions = neverDelete ? [{ checksum: 'SHA256' }] : []
+  await pool(plan.copies, PARALLEL, (file) => store.copy(builds, storedKey(site, commit, file, rebuild), bucket, file, ...copyOptions))
   if (plan.deletes.length) await store.deleteMany(bucket, plan.deletes)
   log(`live: ${plan.copies.length} copied, ${plan.deletes.length} deleted, ${plan.unchanged} unchanged`)
 
@@ -254,14 +305,26 @@ export async function publishLive({ store, site, repo, commit, rebuild = null, d
     else if (o.size !== f.size || plainEtag(o.etag) !== f.etag) problems.push(`${f.path} on live doesn't match the build`)
     after.delete(f.path)
   }
+  for (const key of kept?.kept ?? []) {
+    if (!after.has(key)) problems.push(`${key} was kept, but is gone from live`)
+    after.delete(key)
+  }
   for (const key of after.keys()) problems.push(`${key} is on live but not in the build`)
   if (problems.length) throw new Error(`live doesn't match the build:\n${problems.slice(0, 20).join('\n')}`)
-  log('live bucket checked: exactly the build')
+  log(kept ? `live bucket checked: the build, and the ${kept.kept.length} kept objects` : 'live bucket checked: exactly the build')
 
   const invalidation = await store.invalidate(distributionId, ['/*'], `${site}-${commit}-${Date.now()}`)
   await store.waitInvalidation(distributionId, invalidation)
   log(`live cache cleared (${invalidation})`)
-  return { manifestSha256, files, copies: plan.copies.length, deletes: plan.deletes.length, unchanged: plan.unchanged, invalidation }
+  return {
+    manifestSha256,
+    files,
+    copies: plan.copies.length,
+    deletes: plan.deletes.length,
+    unchanged: plan.unchanged,
+    invalidation,
+    ...(kept ? { kept: kept.kept, redirected: kept.redirected } : {}),
+  }
 }
 
 /**
@@ -399,7 +462,7 @@ export function deploymentEnvironment(site, value = 'live') {
  * report checks live against), what it rebuilt and the content hash platform sent. A data refresh, or a release
  * published with its feed data, names its refresh instead (_builds/<site>/<commit>/refreshes/<run>/).
  */
-export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl, rebuild = null, refresh = null }) {
+export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha256, workflowSha, domain, runUrl, rebuild = null, refresh = null, account = 'live' }) {
   return {
     kind,
     commit,
@@ -412,7 +475,19 @@ export function deploymentPayload({ kind, commit, pr, approver, prs, manifestSha
     run: runUrl,
     ...(rebuild ? { rebuild: { run: rebuild.run, basis: rebuild.basis ?? null, tag: rebuild.tag ?? null, content_sha256: rebuild.contentSha256 ?? null } } : {}),
     ...(refresh ? { refresh: { run: refresh.run, basis: refresh.basis ?? null, tag: refresh.tag ?? null, reason: refresh.reason ?? null } } : {}),
+    // Only a government site's record names its account, so a live site's is what it always was.
+    ...(account !== 'live' ? { account } : {}),
   }
+}
+
+/** A never-delete release's summary: what stayed on live that the build no longer has. */
+export function keptSummary({ kept, redirected }) {
+  if (!kept.length) return '\n\nNever delete: nothing on live is missing from the build.'
+  const files = kept.length - redirected.length
+  return (
+    `\n\nNever delete: ${kept.length} on live but not in the build stayed there (nothing was deleted): ` +
+    `${redirected.length} redirected page${redirected.length === 1 ? '' : 's'}, ${files} file${files === 1 ? '' : 's'}.`
+  )
 }
 
 /** The release kinds publish accepts. */
@@ -555,6 +630,8 @@ async function publishMain() {
     : null
   const storedRef = refresh ? refreshRef(refresh.run) : (rebuild?.run ?? null)
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
+  // Before any AWS call: live or government, nothing else. The credentials are already that account's publish role.
+  const account = checkAccount(env.ACCOUNT)
 
   const problems = checkClaims(await requestClaims(), { workflow: 'release.yml', workflowSha, repo, commit: runSha })
   if (problems.length) throw new Error(`the OIDC token doesn't match this run: ${problems.join('; ')}`)
@@ -589,9 +666,10 @@ async function publishMain() {
     workflowSha,
     domain: host,
     runUrl: env.RUN_URL,
+    account,
   }
   // The manifest first, so the deployment record names it from the start.
-  const stored = await waitForManifest({ store, site, commit, rebuild: storedRef })
+  const stored = await waitForManifest({ store, site, commit, rebuild: storedRef, account })
   base.manifestSha256 = hashes(stored.body).sha256
   // The wait above can last 20 minutes: a go-live release asks again, right before anything is written, so names that
   // moved meanwhile stop it.
@@ -630,11 +708,12 @@ async function publishMain() {
   await status('in_progress', 'publishing')
 
   try {
-    const result = await publishLive({ store, site, repo, commit, rebuild: storedRef, distributionId, stored, maxShare })
+    const result = await publishLive({ store, site, repo, commit, rebuild: storedRef, account, distributionId, stored, maxShare })
     const siteProblems = await checkLiveSite({ domain, site, host, files: result.files })
     summary(
       `### Live\n\nhttps://${host}: ${result.copies} copied, ${result.deletes} deleted, ${result.unchanged} unchanged, cache cleared (${result.invalidation}).\n\n` +
-        `Commit \`${commit}\`, ${what}, manifest SHA-256 \`${result.manifestSha256}\`.`,
+        `Commit \`${commit}\`, ${what}, manifest SHA-256 \`${result.manifestSha256}\`.` +
+        (result.kept ? keptSummary(result) : ''),
     )
     if (siteProblems.length) {
       await status('failure', `published, but live checks failed: ${siteProblems[0]}`)

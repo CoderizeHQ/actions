@@ -2,7 +2,17 @@
 // `mailer`, and appImage.mjs and deployApp.mjs their ECR, EC2 and SSM calls, so the tests (and a dry run) hand them
 // an in-memory fake instead. Credentials come from configure-aws-credentials.
 
-import { CloudFrontClient, CreateInvalidationCommand, ListDistributionsCommand, waitUntilInvalidationCompleted } from '@aws-sdk/client-cloudfront'
+// CloudFront KeyValueStore's API is signed with SigV4A; this registers the SDK's pure-JS signer for it (without it,
+// or the native CRT one, every call fails before it is sent). Only release reads a store, a government site's.
+import '@aws-sdk/signature-v4a'
+import {
+  CloudFrontClient,
+  CreateInvalidationCommand,
+  DescribeKeyValueStoreCommand,
+  ListDistributionsCommand,
+  waitUntilInvalidationCompleted,
+} from '@aws-sdk/client-cloudfront'
+import { CloudFrontKeyValueStoreClient, ListKeysCommand } from '@aws-sdk/client-cloudfront-keyvaluestore'
 import {
   CopyObjectCommand,
   DeleteObjectsCommand,
@@ -38,9 +48,26 @@ const missing = (err) => ['NoSuchKey', 'NotFound', 'AccessDenied', 'Forbidden'].
 /** @param {string} bucket @param {string} key */
 export const copySource = (bucket, key) => `${bucket}/${key.split('/').map(encodeURIComponent).join('/')}`
 
-export function awsStore() {
-  const s3 = new S3Client({ region: REGION })
-  const cloudfront = new CloudFrontClient({ region: REGION })
+/**
+ * The S3 client's checksum settings. A government site's buckets are Object-Locked with a default retention, and S3
+ * refuses an upload to such a bucket without a checksum header. Every PutObject here names its SHA-256 itself; this
+ * also pins the SDK's own default (a checksum on every request that supports one), so an AWS_REQUEST_CHECKSUM_CALCULATION
+ * of WHEN_REQUIRED in a runner's environment can't turn it off.
+ */
+export const S3_CHECKSUMS = Object.freeze({ requestChecksumCalculation: 'WHEN_SUPPORTED' })
+
+/** The S3 client awsStore uses. */
+export const s3Client = (extra = {}) => new S3Client({ region: REGION, ...S3_CHECKSUMS, ...extra })
+
+/** One page of ListKeys (CloudFront's most). */
+export const KVS_PAGE = 50
+
+/**
+ * @param {{ s3?: { send: Function }, cloudfront?: { send: Function }, kvs?: { send: Function } }} [clients] for the
+ *   tests; each is made here otherwise
+ */
+export function awsStore({ s3 = s3Client(), cloudfront = new CloudFrontClient({ region: REGION }), kvs } = {}) {
+  const kvsClient = () => (kvs ??= new CloudFrontKeyValueStoreClient({ region: REGION }))
   return {
     /** @returns {Promise<{ body: Buffer, etag: string } | null>} */
     async get(bucket, key) {
@@ -97,10 +124,18 @@ export function awsStore() {
 
     // Server-side copy, keeping the source's Content-Type, Cache-Control and metadata. One CopyObject per file: a
     // multipart copy (what the CLI's s3 cp/sync does over 8 MB) starts with a write that carries no copy source, which
-    // the live role's IAM refuses. A single CopyObject takes up to 5 GB.
-    async copy(srcBucket, srcKey, bucket, key) {
+    // the live role's IAM refuses. A single CopyObject takes up to 5 GB. With `checksum` (a copy into a government
+    // site's Object-Locked bucket), S3 also computes and stores that checksum of the copy, as an upload there carries
+    // one; without it the request is exactly what it always was.
+    async copy(srcBucket, srcKey, bucket, key, { checksum } = {}) {
       const res = await s3.send(
-        new CopyObjectCommand({ Bucket: bucket, Key: key, CopySource: copySource(srcBucket, srcKey), MetadataDirective: 'COPY' }),
+        new CopyObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          CopySource: copySource(srcBucket, srcKey),
+          MetadataDirective: 'COPY',
+          ...(checksum ? { ChecksumAlgorithm: checksum } : {}),
+        }),
       )
       return { etag: res.CopyObjectResult?.ETag }
     },
@@ -140,6 +175,31 @@ export function awsStore() {
       } while (marker)
       if (found.length > 1) throw new Error(`${found.length} distributions have the comment ${comment}`)
       return found[0] ?? null
+    },
+
+    /**
+     * One site's redirect map from a CloudFront KeyValueStore keyed "<apex><path>" (platform's redirect sync): every
+     * key whose apex, dots as hyphens, is the site name. Cross-site marks ("@site/<domain>") are skipped. Its ARN comes
+     * from its name (cloudfront:DescribeKeyValueStore), the keys from ListKeys (cloudfront-keyvaluestore:ListKeys), 50
+     * a call.
+     * @returns {Promise<Map<string, string>>} path -> target
+     */
+    async redirects(name, site) {
+      const described = await cloudfront.send(new DescribeKeyValueStoreCommand({ Name: name }))
+      const arn = described.KeyValueStore?.ARN
+      if (!arn) throw new Error(`no ARN for the key value store ${name}`)
+      const out = new Map()
+      let token
+      do {
+        const res = await kvsClient().send(new ListKeysCommand({ KvsARN: arn, MaxResults: KVS_PAGE, NextToken: token }))
+        for (const { Key, Value } of res.Items ?? []) {
+          const slash = Key.indexOf('/')
+          if (Key.startsWith('@') || slash <= 0) continue
+          if (Key.slice(0, slash).replaceAll('.', '-') === site) out.set(Key.slice(slash), Value)
+        }
+        token = res.NextToken
+      } while (token)
+      return out
     },
 
     /** Waits up to 10 minutes for an invalidation to finish. */

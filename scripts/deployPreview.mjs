@@ -13,11 +13,19 @@
 //
 // A data refresh (platform's `refresh`; refresh-build.yml built it with the feed's secrets) is stored the same way under
 // _builds/<site>/<commit>/refreshes/<run>/, and never touches the preview either.
+//
+// A government site (ACCOUNT=government, the workflow's `account` input, which platform writes for a government record)
+// stores its builds the same way in the Government account's Object-Locked bucket, coderizehq-gov-builds-<account>,
+// instead of the preview account's. Its preview is still published to sites/<site>/ in the preview account, copied
+// from there. The role is the same preview deploy role, which platform lets write and read its own _builds/<site>/ in
+// that bucket.
 
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import {
+  buildsBucket,
+  checkAccount,
   checkRun,
   checkSha,
   checkSite,
@@ -44,16 +52,17 @@ import { output, runIfMain, summary } from './lib/report.mjs'
 const PARALLEL = 8
 
 /**
- * Stores the build for `commit`, or reuses the complete one already there, then checks it against its manifest. With
+ * Stores the build for `commit` in `bucket` (the site's builds bucket, lib/build.mjs buildsBucket), or reuses the
+ * complete one already there, then checks it against its manifest. With
  * `rebuild` ({ run, contentSha256 }), it is that content rebuild's build, stored in its own folder; with `refresh`
  * ({ run }), that data refresh's.
  * @returns {Promise<{ reused: boolean, manifestSha256: string, files: { path: string, size: number, sha256: string, etag: string }[] }>}
  */
-export async function storeBuild({ store, site, repo, commit, rebuild = null, refresh = null, buildDir, workflowSha, lockfileSha256, now = new Date(), log = console.log }) {
+export async function storeBuild({ store, site, repo, commit, rebuild = null, refresh = null, buildDir, workflowSha, lockfileSha256, bucket = PREVIEW_BUCKET, now = new Date(), log = console.log }) {
   if (rebuild && refresh) throw new Error('a build is a content rebuild or a data refresh, not both')
   const run = refresh ? refreshRef(refresh.run) : (rebuild?.run ?? null)
   const key = manifestKey(site, commit, run)
-  let stored = await store.get(PREVIEW_BUCKET, key)
+  let stored = await store.get(bucket, key)
   const reused = Boolean(stored)
 
   if (stored) {
@@ -64,7 +73,7 @@ export async function storeBuild({ store, site, repo, commit, rebuild = null, re
     await pool(local, PARALLEL, async (f) => {
       const body = await readFile(path.join(buildDir, f.path))
       if (hashes(body).sha256 !== f.sha256) throw new Error(`${f.path} changed while deploying`)
-      const result = await store.putIfAbsent(PREVIEW_BUCKET, storedKey(site, commit, f.path, run), body, {
+      const result = await store.putIfAbsent(bucket, storedKey(site, commit, f.path, run), body, {
         contentType: contentTypeFor(f.path),
         cacheControl: cacheControlFor(f.path),
         sha256: f.sha256,
@@ -72,7 +81,7 @@ export async function storeBuild({ store, site, repo, commit, rebuild = null, re
       if (result === 'exists') {
         // Left by an earlier run that stopped before its manifest. Fine if it's the same file; a different file means
         // the build isn't reproducible, and the write-once store can't take a second version of this commit.
-        const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path, run))
+        const head = await store.head(bucket, storedKey(site, commit, f.path, run))
         if (head?.sha256 !== f.sha256) {
           throw new Error(`${f.path} is already stored for ${commit} with different content; this commit can't be stored again. Push a new commit to deploy`)
         }
@@ -81,20 +90,20 @@ export async function storeBuild({ store, site, repo, commit, rebuild = null, re
 
     const manifest = makeManifest({ site, repo, commit, workflowSha, lockfileSha256, created: now.toISOString(), files: local, rebuild, refresh })
     const body = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`)
-    const result = await store.putIfAbsent(PREVIEW_BUCKET, key, body, {
+    const result = await store.putIfAbsent(bucket, key, body, {
       contentType: 'application/json; charset=utf-8',
       cacheControl: 'no-store',
       sha256: hashes(body).sha256,
     })
     if (result === 'exists') log('another run stored the manifest first; using that one')
-    stored = await store.get(PREVIEW_BUCKET, key)
+    stored = await store.get(bucket, key)
     if (!stored) throw new Error(`stored ${key} but can't read it back`)
   }
 
   const manifestSha256 = hashes(stored.body).sha256
   const files = readManifest(JSON.parse(stored.body.toString('utf8')), { site, repo, commit, rebuild: run })
   const checked = await pool(files, PARALLEL, async (f) => {
-    const head = await store.head(PREVIEW_BUCKET, storedKey(site, commit, f.path, run))
+    const head = await store.head(bucket, storedKey(site, commit, f.path, run))
     if (!head) throw new Error(`stored build is missing ${f.path}`)
     if (head.size !== f.size) throw new Error(`stored ${f.path} is ${head.size} bytes; the manifest says ${f.size}`)
     if (head.sha256 !== f.sha256) throw new Error(`stored ${f.path} doesn't match its manifest hash`)
@@ -105,10 +114,10 @@ export async function storeBuild({ store, site, repo, commit, rebuild = null, re
 }
 
 /**
- * Makes sites/<site>/ match the stored build.
+ * Makes sites/<site>/ match the stored build, copied from `builds`, the bucket it is stored in.
  * @returns {Promise<{ copies: number, deletes: number, unchanged: number, invalidation: string | null }>}
  */
-export async function publishPreview({ store, site, commit, files, maxShare = DEFAULT_MAX_DELETE_SHARE, log = console.log }) {
+export async function publishPreview({ store, site, commit, files, builds = PREVIEW_BUCKET, maxShare = DEFAULT_MAX_DELETE_SHARE, log = console.log }) {
   const prefix = previewPrefix(site)
   const current = (await store.list(PREVIEW_BUCKET, prefix)).map((c) => ({ key: c.key, etag: plainEtag(c.etag) }))
   const plan = planSync(files, current)
@@ -116,7 +125,7 @@ export async function publishPreview({ store, site, commit, files, maxShare = DE
   if (refusal) throw new Error(refusal)
 
   // New files first and deletes last, so the preview never links to something already gone.
-  await pool(plan.copies, PARALLEL, (file) => store.copy(PREVIEW_BUCKET, storedKey(site, commit, file), PREVIEW_BUCKET, `${prefix}${file}`))
+  await pool(plan.copies, PARALLEL, (file) => store.copy(builds, storedKey(site, commit, file), PREVIEW_BUCKET, `${prefix}${file}`))
   if (plan.deletes.length) await store.deleteMany(PREVIEW_BUCKET, plan.deletes.map((k) => `${prefix}${k}`))
   log(`preview: ${plan.copies.length} copied, ${plan.deletes.length} deleted, ${plan.unchanged} unchanged`)
 
@@ -139,6 +148,8 @@ async function main() {
   const refresh = env.REFRESH_RUN ? { run: checkRun(env.REFRESH_RUN) } : null
   if (!rebuild && !refresh && commit !== runSha) throw new Error(`deploy-preview builds the run's own commit ${runSha}, not ${commit}, except in a content rebuild or a data refresh`)
   const workflowSha = checkSha(env.WORKFLOW_SHA, 'workflow')
+  // Before any AWS call: live or government, nothing else.
+  const builds = buildsBucket(checkAccount(env.ACCOUNT))
   const repo = env.REPO
   const maxShare = env.MAX_DELETE_SHARE ? Number(env.MAX_DELETE_SHARE) : DEFAULT_MAX_DELETE_SHARE
   if (!/^[0-9a-f]{64}$/.test(env.LOCKFILE_SHA256 ?? '')) throw new Error('LOCKFILE_SHA256 is not a SHA-256')
@@ -158,6 +169,7 @@ async function main() {
     buildDir: env.BUILD_DIR,
     workflowSha,
     lockfileSha256: env.LOCKFILE_SHA256,
+    bucket: builds,
   })
   output('manifest-sha256', stored.manifestSha256)
   const how = stored.reused ? 'Reused' : 'Stored'
@@ -182,7 +194,7 @@ async function main() {
     summary('Preview not updated: a newer commit is on main and its own run publishes it.')
     return
   }
-  const result = await publishPreview({ store, site, commit, files: stored.files, maxShare })
+  const result = await publishPreview({ store, site, commit, files: stored.files, builds, maxShare })
   const cache = result.invalidation ? `cache cleared (${result.invalidation})` : 'cache left alone'
   summary(
     `### Preview\n\nhttps://${site}.preview.coderize.dev: ${result.copies} copied, ${result.deletes} deleted, ` +
