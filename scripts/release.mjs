@@ -69,6 +69,7 @@ import {
   manifestKey,
   neverDeletePlan,
   pageUrl,
+  redirectKey,
   planSync,
   pool,
   readManifest,
@@ -236,13 +237,15 @@ export async function waitForManifest({ store, site, commit, rebuild = null, acc
  * @returns {string}
  */
 export function neverDeleteRefusal(site, refused) {
-  const shown = refused.slice(0, 20).map((k) => `${pageUrl(k)} (${k})`)
+  const shown = refused.slice(0, 20).map((k) => `${redirectKey(pageUrl(k))} (${k})`)
   const more = refused.length > shown.length ? `\n…and ${refused.length - shown.length} more` : ''
   return (
     `${site} is a government site, whose releases never delete a page, but this build lacks ${refused.length} ` +
     `page${refused.length === 1 ? '' : 's'} live now with no redirect in its record:\n${shown.join('\n')}${more}\n` +
     "Nothing was published. Put the page back in the build, or add a redirect for its URL to the record's redirects " +
-    '(platform sites/<site>.json) and apply it, then release again.'
+    '(platform sites/<site>.json) and apply it, then release again. A redirect key is the URL as listed above: no ' +
+    'trailing slash (/about, not /about/ or /about/index.html, since the router strips the slash before it looks), ' +
+    'percent-encoded the way a browser sends it.'
   )
 }
 

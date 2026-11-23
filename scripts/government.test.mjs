@@ -28,6 +28,8 @@ import {
   pageUrl,
   PREVIEW_BUCKET,
   redirectCovers,
+  redirectKey,
+  redirectKeys,
   storedKey,
 } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
@@ -92,6 +94,51 @@ test('a redirect covers a page by its URL, as stored or percent-encoded', () => 
   assert.ok(redirectCovers(redirects, 'Board Minutes.html'))
   assert.ok(!redirectCovers(redirects, 'about.html'), '/about.html is another URL')
   assert.ok(!redirectCovers(new Map([['/about/index.html', '/x']]), 'about/index.html'), 'the page is served at /about, which would still 404')
+})
+
+test('redirect keys: # and ? are matched encoded, as a browser must send them', () => {
+  assert.deepEqual(redirectKeys('/old#page.html'), ['/old#page.html', '/old%23page.html'])
+  assert.ok(redirectCovers(new Map([['/old%23page.html', '/']]), 'old#page.html'))
+  assert.ok(redirectCovers(new Map([['/what%3Fnow.html', '/']]), 'what?now.html'))
+  assert.ok(redirectCovers(new Map([['/a%3Fb%23c/x%20y', '/']]), 'a?b#c/x y/index.html'), 'in a folder name, with a space')
+  assert.ok(!redirectCovers(new Map([['/old', '/']]), 'old#page.html'), 'never the part before a raw # or ?')
+})
+
+test('redirect keys: spaces and unicode, each segment encoded and the slashes kept', () => {
+  assert.ok(redirectCovers(new Map([['/Board%20Minutes/2019%20Agenda.html', '/']]), 'Board Minutes/2019 Agenda.html'))
+  assert.ok(redirectCovers(new Map([['/caf%C3%A9/men%C3%BC', '/']]), 'café/menü/index.html'))
+  assert.ok(redirectCovers(new Map([['/caf%C3%A9.html', '/']]), 'café.html'))
+  assert.equal(redirectKey('/café/a b#1?.html'), '/caf%C3%A9/a%20b%231%3F.html')
+})
+
+test('redirect keys: reserved characters a browser leaves alone match raw or fully encoded', () => {
+  // A browser sends /a,b;c=d&e+f$g@h:i.html as it is; encodeURIComponent would encode every one of those.
+  assert.ok(redirectCovers(new Map([['/a,b;c=d&e+f$g@h:i.html', '/']]), 'a,b;c=d&e+f$g@h:i.html'))
+  assert.ok(redirectCovers(new Map([['/a%2Cb%3Bc%3Dd%26e%2Bf%24g%40h%3Ai.html', '/']]), 'a,b;c=d&e+f$g@h:i.html'))
+  // Mixed: a comma left alone and a # encoded, as a browser does.
+  assert.ok(redirectCovers(new Map([['/minutes,2019%231.html', '/']]), 'minutes,2019#1.html'))
+})
+
+test('the refusal names each page by the key to add: no trailing slash, encoded as a browser sends it', () => {
+  const msg = neverDeleteRefusal(site, ['board/index.html', 'old#page.html', 'Board Minutes.html'])
+  assert.match(msg, /\n\/board \(board\/index\.html\)\n/)
+  assert.match(msg, /\n\/old%23page\.html \(old#page\.html\)\n/)
+  assert.match(msg, /\n\/Board%20Minutes\.html \(Board Minutes\.html\)\n/)
+  assert.match(msg, /no trailing slash \(\/about, not \/about\/ or \/about\/index\.html/)
+})
+
+test('release, government: a dropped page whose name holds # passes on its encoded redirect', async () => {
+  const store = memoryStore()
+  store.lock(`coderizehq-live-${site}`)
+  const body = '<h1>EMCOG</h1>'
+  const manifest = { version: 1, site, repo, commit, workflow_sha: '2'.repeat(40), lockfile_sha256: '3'.repeat(64), created: 'x', files: {} }
+  store.seed(GOVERNMENT_BUILDS_BUCKET, storedKey(site, commit, 'index.html'), body)
+  manifest.files['index.html'] = { size: Buffer.byteLength(body), sha256: hashes(Buffer.from(body)).sha256 }
+  store.seed(GOVERNMENT_BUILDS_BUCKET, manifestKey(site, commit), JSON.stringify(manifest))
+  store.seed(`coderizehq-live-${site}`, 'old#page.html', 'old')
+  store.redirectStores.set(GOVERNMENT_REDIRECT_STORE, new Map([['emcog.org/old%23page.html', '/']]))
+  const r = await publishLive({ store, site, repo, commit, account: 'government', distributionId: 'EGOV', log: () => {} })
+  assert.deepEqual(r.redirected, ['old#page.html'])
 })
 
 test('neverDeletePlan keeps everything, and refuses only pages with no redirect', () => {

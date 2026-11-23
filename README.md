@@ -238,8 +238,10 @@ step repeats it, and a test keeps the two the same.
   keeps answering;
 - a page (an `.html` or `.htm` object) the build no longer has refuses the release, before anything is copied or
   written and with every such page listed, unless the site's redirect map has an entry for the page's URL (the router's
-  URL for it: `/` for `index.html`, `/<dir>` for `<dir>/index.html`, `/<key>` for any other page; percent-encoded the
-  way a browser sends it also counts). A redirected page stays in the bucket too, and the router answers its URL with
+  URL for it, with no trailing slash: `/` for `index.html`, `/<dir>` for `<dir>/index.html`, `/<key>` for any other
+  page). The router keys the map by the path as the browser sent it, so the key is matched raw, with each segment
+  through `encodeURIComponent`, or as a browser encodes it (spaces and unicode encoded, `#` and `?` as `%23` and `%3F`,
+  other reserved characters left alone); the refusal lists each page in that last form. A redirected page stays in the bucket too, and the router answers its URL with
   the 301 before the file is ever reached (it reads the redirect map before any file). To drop a page, add a redirect
   for it to the record's `redirects` (platform `sites/<site>.json`), apply, then release. The kept page is still in
   the bucket, so every later release checks its redirect again: taking the redirect out would serve the old page again,

@@ -203,14 +203,34 @@ export function pageUrl(key) {
 }
 
 /**
- * Whether `redirects` (the site's redirect map: path -> target) covers a dropped page: an entry for the page's URL, as
- * stored or percent-encoded the way a browser sends it (a record's path can't hold a space, so /Board Minutes.html is
- * /Board%20Minutes.html there).
+ * The forms a page's URL can take as a redirect key. The router keys the map by the request's path as the browser sent
+ * it (percent-encoded, never decoded), and a record's path can hold no space, `?` or `#`, so /Board Minutes.html is
+ * /Board%20Minutes.html there and old#page.html is /old%23page.html. The forms, each segment encoded and `/` kept:
+ * - the raw path, for a key with nothing to encode;
+ * - each segment through encodeURIComponent (`#`, `?`, spaces, unicode, and also `,` `;` `=` `&` `+` `$` `@` `:`);
+ * - the way a browser sends it: encodeURI's encoding (spaces and unicode, reserved characters left alone), with `#`
+ *   and `?` encoded too, since sent raw they would end the path.
+ * @returns {string[]} the distinct forms
+ */
+export function redirectKeys(url) {
+  const component = url.split('/').map((s) => encodeURIComponent(s)).join('/')
+  return [...new Set([url, component, redirectKey(url)])]
+}
+
+/** A page URL as a browser requests it, so as a record's redirect key should name it (redirectKeys). */
+export const redirectKey = (url) =>
+  url
+    .split('/')
+    .map((s) => encodeURI(s).replaceAll('#', '%23').replaceAll('?', '%3F'))
+    .join('/')
+
+/**
+ * Whether `redirects` (the site's redirect map: path -> target) covers a dropped page: an entry for the page's URL in
+ * any of the forms the router can see it in (redirectKeys).
  * @param {Map<string, string>} redirects
  */
 export function redirectCovers(redirects, key) {
-  const url = pageUrl(key)
-  return redirects.has(url) || redirects.has(encodeURI(url))
+  return redirectKeys(pageUrl(key)).some((k) => redirects.has(k))
 }
 
 /**
