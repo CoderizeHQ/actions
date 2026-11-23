@@ -4,10 +4,15 @@
 // and can't carry a checksum of its own making: the runners install through a cache (Verdaccio) that the lockfile's
 // integrity is checked against, so the registry is the only independent witness.
 //
+// The one exception is a workspace package pnpm injects (injectWorkspacePackages, which build-app-image requires): when an
+// injected copy can't be deduplicated back to a link, pnpm records it as `name@file:<dir>` resolved from
+// `{directory: <dir>, type: directory}`. That is the repo's own code, so it passes when <dir> is one of the lockfile's
+// importers, lies inside the checkout, and its package.json carries that name. Any other folder still fails.
+//
 // A committed .npmrc may not point any scope at another registry either. The rule that a lockfile change needs a
 // package.json change (Renovate's lockfile updates apart) stays in the workflow, where the PR's facts are.
 
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { runIfMain, summary } from './lib/report.mjs'
@@ -59,12 +64,85 @@ export function lockfilePackages(text) {
   return entries
 }
 
-/** Problems with the entries themselves, without asking the registry. */
-export function entryProblems(entries) {
+/**
+ * The workspace packages' folders: every `importers:` key of the lockfile apart from the root (`.`).
+ * @param {string} text
+ * @returns {string[]}
+ */
+export function lockfileImporters(text) {
+  const dirs = new Set()
+  let inImporters = false
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\S/.test(line)) {
+      inImporters = line.trimEnd() === 'importers:'
+      continue
+    }
+    // `apps/web:`, or `packages/ui: {}` for a package with no dependencies.
+    const key = inImporters && /^ {2}(\S.*?):(?:\s+\{\})?\s*$/.exec(line)
+    if (key) dirs.add(key[1].replace(/^'(.*)'$/, '$1'))
+  }
+  dirs.delete('.')
+  return [...dirs]
+}
+
+/** A folder in the plain relative form pnpm writes: no absolute path, drive, backslash, `.` or `..` segment. */
+export function isPlainRelativeDir(dir) {
+  return (
+    typeof dir === 'string' &&
+    dir !== '' &&
+    !dir.startsWith('/') &&
+    !/^[A-Za-z]:/.test(dir) &&
+    !dir.includes('\\') &&
+    dir.split('/').every((s) => s !== '' && s !== '.' && s !== '..')
+  )
+}
+
+/**
+ * Maps each importer folder that really lies inside the checkout (symlinks resolved) to its package.json name.
+ * @param {string} dir the checkout
+ * @param {string[]} importers
+ * @returns {Promise<Map<string, string>>}
+ */
+export async function workspacePackages(dir, importers) {
+  const root = await realpath(dir)
+  const out = new Map()
+  for (const rel of importers) {
+    if (!isPlainRelativeDir(rel)) continue
+    const real = await realpath(path.join(root, rel)).catch(() => null)
+    if (!real) continue
+    const inside = path.relative(root, real)
+    if (!inside || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) continue
+    const pkg = await readFile(path.join(real, 'package.json'), 'utf8')
+      .then(JSON.parse)
+      .catch(() => null)
+    if (typeof pkg?.name === 'string') out.set(rel, pkg.name)
+  }
+  return out
+}
+
+/**
+ * Whether an entry is an injected workspace package: `name@file:<dir>` resolved from exactly
+ * `{directory: <dir>, type: directory}`, where <dir> is a workspace package named `name`.
+ * @param {{ name: string, version: string, resolution: Record<string, string> | null }} e
+ * @param {Map<string, string>} workspace from workspacePackages
+ */
+export function isWorkspacePackage(e, workspace) {
+  const r = e.resolution
+  if (!r || r.type !== 'directory' || Object.keys(r).length !== 2) return false
+  return e.version === `file:${r.directory}` && workspace.get(r.directory) === e.name
+}
+
+/**
+ * Problems with the entries themselves, without asking the registry.
+ * @param {{ key: string, name: string, version: string, resolution: Record<string, string> | null }[]} entries
+ * @param {Map<string, string>} [workspace] the workspace packages that may be injected (workspacePackages)
+ */
+export function entryProblems(entries, workspace = new Map()) {
   const problems = []
   for (const e of entries) {
     const r = e.resolution
     if (!r) problems.push(`${e.key} has no resolution`)
+    else if (isWorkspacePackage(e, workspace)) continue
     else if (r.type || r.commit || r.repo || r.directory || r.path) problems.push(`${e.key} is not from the npm registry (${Object.entries(r).map(([k, v]) => `${k}: ${v}`).join(', ')})`)
     else if (r.tarball && !r.tarball.startsWith(REGISTRY)) problems.push(`${e.key} downloads from ${r.tarball}, not ${REGISTRY}`)
     else if (!/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(r.integrity ?? '')) problems.push(`${e.key} has no sha512 integrity checksum`)
@@ -127,16 +205,22 @@ async function main() {
 
   // The same package can appear in both YAML documents.
   const entries = [...new Map(lockfilePackages(lockfile).map((e) => [e.key, e])).values()]
-  const problems = [...npmrcProblems(npmrc), ...entryProblems(entries)]
+  const workspace = await workspacePackages(dir, lockfileImporters(lockfile))
+  const problems = [...npmrcProblems(npmrc), ...entryProblems(entries, workspace)]
+  const fromRegistry = entries.filter((e) => !isWorkspacePackage(e, workspace))
   // Checking the registry only makes sense for entries that claim to come from it.
-  if (!problems.length) problems.push(...(await registryProblems(entries)))
+  if (!problems.length) problems.push(...(await registryProblems(fromRegistry)))
 
   if (problems.length) {
     for (const p of problems) console.log(`::error::${p}`)
     summary(`### Lockfile\n\n${problems.map((p) => `- ${p}`).join('\n')}`)
     process.exit(1)
   }
-  console.log(`${entries.length} packages in pnpm-lock.yaml, each from ${REGISTRY} with the checksum it publishes.`)
+  const injected = entries.length - fromRegistry.length
+  console.log(
+    `${fromRegistry.length} packages in pnpm-lock.yaml, each from ${REGISTRY} with the checksum it publishes` +
+      (injected ? `, and ${injected} injected workspace package${injected === 1 ? '' : 's'} from the repo's own folders.` : '.'),
+  )
 }
 
 runIfMain(import.meta.url, main)
