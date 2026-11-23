@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/CoderizeHQ/actions/compare/v1.12.0...v1.12.1) (2026-11-23)
+
+
+### Bug Fixes
+
+* let injected workspace packages through the lockfile checks ([#60](https://github.com/CoderizeHQ/actions/issues/60)) ([70c7ca0](https://github.com/CoderizeHQ/actions/commit/70c7ca059c48c4a89148c82e00c0201c2f65caf5))
+
 ## [1.12.0](https://github.com/CoderizeHQ/actions/compare/v1.11.0...v1.12.0) (2026-11-23)
 
 
