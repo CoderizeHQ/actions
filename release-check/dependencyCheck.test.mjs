@@ -71,6 +71,24 @@ test('a major bump, a non-registry source or a missing diff is a problem', () =>
   assert.deepEqual(lockfileChanges('+  brand-new@1.0.0:\n+    resolution: {integrity: sha512-x}').problems, [], 'a new transitive package is fine')
 })
 
+test('an injected workspace package is not a download, but any other folder still is', () => {
+  const injected = [
+    "+  '@acme/portal@file:apps/portal':",
+    '+    resolution: {directory: apps/portal, type: directory}',
+    "+  '@acme/portal@file:apps/portal(react@19.3.1)':",
+    '-        version: link:../portal',
+    '+        version: file:apps/portal(react@19.3.1)',
+  ].join('\n')
+  assert.deepEqual(lockfileChanges(injected), { problems: [], bumps: [] })
+  for (const line of [
+    '+    resolution: {directory: ../outside, type: directory}',
+    '+    resolution: {directory: /etc, type: directory}',
+    '+    resolution: {directory: apps/portal, type: directory, integrity: sha512-x}',
+    '+    resolution: {tarball: file:apps/portal.tgz}',
+  ])
+    assert.match(lockfileChanges(line).problems[0] ?? '', /not from the npm registry/, line)
+})
+
 test('a gap of passing Renovate lockfile PRs is released', () => {
   assert.deepEqual(decideDependencyRun(facts()), { ok: true, nothing: false, reasons: [], prs: [7] })
 })

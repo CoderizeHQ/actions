@@ -1,7 +1,21 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 import { test } from 'node:test'
 
-import { entryProblems, lockfilePackages, npmrcProblems, parseKey, registryProblems, versionUrl } from './lockfileCheck.mjs'
+import {
+  entryProblems,
+  isPlainRelativeDir,
+  isWorkspacePackage,
+  lockfileImporters,
+  lockfilePackages,
+  npmrcProblems,
+  parseKey,
+  registryProblems,
+  versionUrl,
+  workspacePackages,
+} from './lockfileCheck.mjs'
 
 // The shape pnpm 12 writes: one YAML document for pnpm itself, then the project's.
 const LOCKFILE = `---
@@ -113,4 +127,103 @@ test('a registry outage is retried, then stops the check rather than passing it'
   }
   await assert.rejects(registryProblems([{ key: 'a@1.0.0', name: 'a', version: '1.0.0', resolution: { integrity: 'sha512-x' } }], down), /503/)
   assert.equal(calls, 3)
+})
+
+// What pnpm writes when injectWorkspacePackages can't deduplicate an injected copy back to a link
+// (trafficticketbuddy-com-mono: the API's devDependency on its portal, once their peers resolved differently).
+const INJECTED = `---
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    devDependencies:
+      turbo:
+        specifier: ^2.10.12
+        version: 2.11.11
+
+  apps/api:
+    devDependencies:
+      '@acme/portal':
+        specifier: workspace:*
+        version: file:apps/portal(react@19.3.1)
+
+  apps/portal:
+    dependencies:
+      '@acme/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
+
+  packages/ui: {}
+
+packages:
+
+  '@acme/portal@file:apps/portal':
+    resolution: {directory: apps/portal, type: directory}
+    engines: {node: '>=26'}
+
+  '@acme/ui@file:packages/ui':
+    resolution: {directory: packages/ui, type: directory}
+
+  turbo@2.11.11:
+    resolution: {integrity: sha512-tttt}
+
+snapshots:
+
+  '@acme/portal@file:apps/portal(react@19.3.1)':
+    dependencies:
+      '@acme/ui': file:packages/ui
+`
+
+test('reads the importer folders, apart from the root', () => {
+  assert.deepEqual(lockfileImporters(INJECTED), ['apps/api', 'apps/portal', 'packages/ui'])
+  assert.deepEqual(lockfileImporters(LOCKFILE), [])
+})
+
+test('only plain relative folders count', () => {
+  for (const ok of ['apps/portal', 'packages/ui', 'a']) assert.equal(isPlainRelativeDir(ok), true, ok)
+  for (const bad of ['', '.', '..', '../x', 'apps/../..', './apps', '/etc', 'C:/x', 'apps\\x', 'apps//x', 'apps/'])
+    assert.equal(isPlainRelativeDir(bad), false, bad)
+})
+
+test('an injected workspace package passes; any other folder still fails', () => {
+  const workspace = new Map([
+    ['apps/api', '@acme/api'],
+    ['apps/portal', '@acme/portal'],
+    ['packages/ui', '@acme/ui'],
+  ])
+  const entries = lockfilePackages(INJECTED)
+  assert.deepEqual(entryProblems(entries, workspace), [])
+  assert.deepEqual(entries.filter((e) => !isWorkspacePackage(e, workspace)).map((e) => e.key), ['turbo@2.11.11'], 'only registry packages go to the registry')
+
+  // Without the workspace (or before this change), they're folders like any other.
+  assert.equal(entryProblems(entries).length, 2)
+  // A name that isn't the folder's package.json name.
+  assert.match(entryProblems(entries, new Map([['apps/portal', '@acme/other'], ['packages/ui', '@acme/ui']]))[0], /@acme\/portal@file:apps\/portal' is not from the npm registry/)
+  const one = (key, resolution) => entryProblems([{ key, ...parseKey(key), resolution }], workspace)
+  // A folder that isn't an importer, a key that names another folder, or anything beyond directory and type.
+  assert.equal(one('@acme/portal@file:vendor/portal', { directory: 'vendor/portal', type: 'directory' }).length, 1)
+  assert.equal(one('@acme/portal@file:apps/portal', { directory: 'packages/ui', type: 'directory' }).length, 1)
+  assert.equal(one('@acme/portal@file:apps/portal', { directory: 'apps/portal', type: 'directory', integrity: 'sha512-x' }).length, 1)
+  assert.equal(one('@acme/portal@1.0.0', { directory: 'apps/portal', type: 'directory' }).length, 1)
+  assert.equal(one('@acme/portal@file:apps/portal', { tarball: 'file:apps/portal.tgz', type: 'directory', directory: 'apps/portal' }).length, 1)
+})
+
+test('workspace packages are read from folders inside the checkout only', async (t) => {
+  const base = await mkdtemp(path.join(tmpdir(), 'lockfile-check-'))
+  t.after(() => rm(base, { recursive: true, force: true }))
+  const repo = path.join(base, 'repo')
+  const pkg = async (dir, json) => {
+    await mkdir(dir, { recursive: true })
+    if (json !== undefined) await writeFile(path.join(dir, 'package.json'), json)
+  }
+  await pkg(path.join(repo, 'apps/portal'), JSON.stringify({ name: '@acme/portal' }))
+  await pkg(path.join(repo, 'apps/broken'), '{ not json')
+  await pkg(path.join(repo, 'apps/empty'))
+  await pkg(path.join(base, 'outside'), JSON.stringify({ name: '@acme/outside' }))
+  // A folder in the repo that is a link to one outside it.
+  await symlink(path.join(base, 'outside'), path.join(repo, 'apps/linked'), 'junction')
+
+  const found = await workspacePackages(repo, ['apps/portal', 'apps/broken', 'apps/empty', 'apps/missing', 'apps/linked', '../outside', '.'])
+  assert.deepEqual([...found], [['apps/portal', '@acme/portal']])
 })

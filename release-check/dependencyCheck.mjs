@@ -20,6 +20,7 @@
 import { isDeepStrictEqual } from 'node:util'
 
 import { gh, ghAll, ghFind } from '../scripts/lib/github.mjs'
+import { isPlainRelativeDir } from '../scripts/lockfileCheck.mjs'
 import { RELEASE_BOT_ID } from './releaseCheck.mjs'
 
 export const RENOVATE_ID = 357122915 // coderizehq-renovate[bot]: CoderizeHQ's self-hosted Renovate App (5775623)
@@ -110,6 +111,19 @@ export function isMinorOrPatch(from, to) {
 //   '@scope/name@1.2.3':   name@1.2.3:   name@1.2.3(peer@4.5.6):
 const KEY = /^([+-]) {2}'?((?:@[^/@\s']+\/)?[^@\s'(]+)@([^('\s:]+)(?:\([^']*\))?'?:\s*$/
 
+// An injected workspace package (injectWorkspacePackages) that pnpm couldn't deduplicate back to a link: the repo's own
+// folder, not a download. ci-site's lockfile check, which every PR here must have passed, confirms the folder is one of
+// the workspace's own packages; this only keeps the form to a plain relative folder. Its `name@file:<dir>` key never
+// matches KEY, so it isn't counted as a version move either.
+const WORKSPACE_DIRECTORY = /^\+\s+resolution: \{directory: ([^,{}\s]+), type: directory\}\s*$/
+
+/** Whether a lockfile diff line adds a resolution that is not a registry download (an injected workspace folder apart). */
+function isForeignResolution(line) {
+  if (!/^\+\s+resolution: \{(?!integrity:)/.test(line)) return false
+  const dir = WORKSPACE_DIRECTORY.exec(line)?.[1]
+  return !(dir && isPlainRelativeDir(dir))
+}
+
 /**
  * Reads the package versions a pnpm-lock.yaml diff adds and removes.
  * @param {string | undefined} patch the PR file's patch from GitHub
@@ -121,7 +135,7 @@ export function lockfileChanges(patch) {
   const removed = new Map()
   const added = new Map()
   for (const line of patch.split('\n')) {
-    if (/^\+\s+resolution: \{(?!integrity:)/.test(line)) problems.push(`a package not from the npm registry: ${line.slice(1).trim()}`)
+    if (isForeignResolution(line)) problems.push(`a package not from the npm registry: ${line.slice(1).trim()}`)
     const m = KEY.exec(line)
     if (!m) continue
     const [, sign, name, version] = m
