@@ -54,9 +54,10 @@ required workflow that isn't there blocks every PR it covers.
 | `ci-site.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `indexed` (`true`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `min-pages` (1), `pages-per-template` (3; 0 scans every page) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
-| `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild workflow only) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main; `notify` uses `coderizehq-notify-send` (Notifications) |
-| `release.yml` | site, version tag or weekly on main; a site's rebuild workflow | `site`, `max-delete-share` (`0.25`), `deployment` (`live`) | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
-| `rebuild-target.yml` | a site's rebuild workflow (Content rebuilds) | `site`, `deployment` (`live`); output `commit` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: read` | None: no AWS, no writes. Finds the commit a content rebuild builds |
+| `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds); a site's refresh and release workflows (Data refreshes) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild and refresh workflows only), `refresh-lockfile-sha256` (empty; a data refresh's store only) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main, and (for a refresh site's release storing its refresh) its version tags; `notify` uses `coderizehq-notify-send` (Notifications) |
+| `release.yml` | site, version tag or weekly on main; a site's rebuild and refresh workflows | `site`, `max-delete-share` (`0.25`), `deployment` (`live`), `check-only`, `refresh` (`false`), `refresh-results` (empty); outputs `publish`, `commit`, `refreshable` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
+| `rebuild-target.yml` | a site's rebuild or refresh workflow (Content rebuilds, Data refreshes) | `site`, `deployment` (`live`); output `commit` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: read` | None: no AWS, no writes. Finds the commit a content rebuild or data refresh builds |
+| `refresh-build.yml` | a site's refresh and release workflows (Data refreshes) | `site`, `package` (empty), `build-dir` (`dist`), `commit`, `environment`, `secret-names`; output `lockfile-sha256`; `secrets: inherit` | `contents: read` | None: no AWS (no `id-token`), stores nothing. The only job a site's feed secrets reach, from its refresh environment, and only its build step |
 | `build-app-image.yml` | an app repo, every PR and push to main | `app`, `package`, `entry` | `contents: read`, `actions: read`, `id-token: write` | Builds the app's linux/arm64 image without Docker (crane on a pinned Node base); on main, `coderizehq-app-build-<app>` pushes it to ECR tagged with the commit. That role trusts only this file at `v1`/`v1.*`, from the app repo's main (platform `docs/apps.md`) |
 | `deploy-app.yml` | an app repo, version tag or main | `app` | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-app-deploy-<app>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; it may only run the app's own deploy document on the app server, read and tag its own ECR repository, and find the server |
 | `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
@@ -234,6 +235,56 @@ platform-written rebuild workflow (`rebuild.yml`, or `rebuild-<site>.yml` in an 
 No new trust: every AWS call is made by the same roles as before (the preview role for `deploy-preview.yml` on main,
 the live role for `release.yml` in the `release` environment on main), and both read and write only
 `_builds/<site>/*` and the site's own bucket, as they always did.
+
+### Data refreshes
+
+For a live site whose build bakes in data from a feed that needs credentials and has to stay fresh by a rule
+(lapeerrealty.com's MLS listings: Realcomp allows displayed data at most 12 hours old; James, C2614). Platform's record
+field `refresh` (`{ "every": "3h", "secrets": ["REALCOMP_CLIENT_ID", "REALCOMP_CLIENT_SECRET"] }`) opts a site in,
+gives its repo a `refresh` environment (`refresh-<site>` for a package site; main and version tags only, since a
+release builds there too) whose secrets James types in,
+and platform's refresh check (its `release-bootstrap.yml`, as the release App) sends the site's repo the
+`repository_dispatch` `data-refresh` (`{ site, reason }`) every `every` hours and straight after a release publishes.
+**The code is always the commit James approved in the site's last release; only the feed data changes.** The site's
+platform-written refresh workflow (`refresh.yml`, or `refresh-<site>.yml` in an app repo) runs four jobs:
+
+1. `rebuild-target.yml`: checks the dispatch and finds the commit live runs now, exactly as for a content rebuild,
+   with one difference: a go-live release (an alias move under way) is taken too, but only when its commit is itself an
+   approved release (`approvedCommit`: a version tag passing `release-check`, or a dependency-only gap). main's head
+   that no release names never gets the secrets.
+2. `refresh-build.yml`: the only job the secrets reach. It names the environment (an environment's secrets reach only a
+   job that names it, and the calling job can't, so the caller passes them with `secrets: inherit`), checks the
+   inputs (the environment matches the package, each name follows platform's rules again: none the runner or the
+   build's tools read, none a framework inlines into pages), checks out the commit, hashes the lockfile, runs
+   `pnpm install` with no secrets, then takes only the named secrets (a missing one fails here) into a file only the
+   build step reads and deletes (never `$GITHUB_ENV`, so the upload never sees them), builds and uploads `site-build`.
+   `build-dir` must be a relative folder inside the package, with no `..`. Anything `pnpm install` writes to the job's
+   environment files is discarded and the build refused, so install scripts can't reach the steps that hold secrets.
+   Outside a `data-refresh` dispatch, `commit` must be the run's own commit. It has Contents: read only: no `id-token`, so no AWS role can trust it.
+3. `deploy-preview.yml` with `rebuild-commit` and `refresh-lockfile-sha256`: skips its own build, stores the run's
+   `site-build` write-once at `_builds/<site>/<commit>/refreshes/<run>/` (its manifest says `refresh: { run }`), and
+   leaves the preview alone. No secret reaches it.
+4. `release.yml` with `refresh: true` and `refresh-results` (how build and store ended): verify finds the target again
+   and refuses unless both succeeded (so a failed refresh is emailed, never silent); publish copies the run's stored
+   refresh, also to a distribution with no names yet (the feed data goes in before an alias move's names move), and
+   refuses if live moved meanwhile. It records a deployment of kind `refresh` whose payload adds `refresh` (`run`,
+   `basis`, `tag`, `reason`).
+
+**Releases with the data** (James, C2620 a). A release publishes the build stored for its commit, built with no
+secrets, which over a refreshed site would delete the feed's pages (and be refused by the mass-delete guard). So a
+refresh site's platform-written release workflow (and so `fleet rollback`, which starts it on an older tag) calls
+`release.yml` with `check-only: true` first: verify alone, whose `refreshable` output says whether the run's commit may
+be built with the secrets (a version or dependency-only release; a go-live release only when its commit is an approved
+one). Then `refresh-build.yml` and `deploy-preview.yml` on the run's own commit, then `release.yml` again with
+`refresh: true`, which publishes that refresh: one release, with the feed data, never a build without it. A commit that
+isn't refreshable is published as before. `refresh` on a release records the usual kind (`version`, `dependency`,
+`go-live`) with the `refresh` payload beside it.
+
+Trust: the live role and notify role are unchanged. Storing a refresh from a release on a version tag needs the
+preview role to trust `deploy-preview.yml` on the site repo's version tags as well as main: platform gives only a site
+with `refresh` the separate `aws/trust/preview-deploy-refresh.json.tftpl` (every other site keeps the main-only
+`preview-deploy.json.tftpl`); tags are made only by the release App. This is the cost of releasing with the data in
+one run (C2620 a).
 
 ### Notifications
 

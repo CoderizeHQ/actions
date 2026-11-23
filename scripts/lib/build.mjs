@@ -46,9 +46,23 @@ export function checkRun(run) {
 }
 
 export const rebuildPrefix = (site, commit, run) => `${buildPrefix(site, commit)}rebuilds/${checkRun(run)}/`
-const prefixOf = (site, commit, rebuild) => (rebuild ? rebuildPrefix(site, commit, rebuild) : buildPrefix(site, commit))
 
-/** The stored build's folder: the commit's own, or, with `rebuild` (a run id), that content rebuild's. */
+// A data refresh (platform's `refresh` record field, its README "Data refreshes"): the commit live runs now, or the
+// commit a release has just approved, built again with a feed's secrets (refresh-build.yml) so its feed data is fresh.
+// It is stored the same way, beside the commit's first build, in a folder named for the run that built it:
+// _builds/<site>/<commit>/refreshes/<run>/. IAM is unaffected: every grant is on _builds/<site>/*.
+export const refreshPrefix = (site, commit, run) => `${buildPrefix(site, commit)}refreshes/${checkRun(run)}/`
+
+/**
+ * Which stored build of a commit, as the key helpers below take it: null (the commit's own), a run id (a content
+ * rebuild's), or a data refresh's, made by refreshRef(run).
+ */
+export const refreshRef = (run) => ({ refresh: checkRun(run) })
+export const isRefreshRef = (ref) => typeof ref === 'object' && ref !== null
+const prefixOf = (site, commit, ref) =>
+  !ref ? buildPrefix(site, commit) : isRefreshRef(ref) ? refreshPrefix(site, commit, ref.refresh) : rebuildPrefix(site, commit, ref)
+
+/** The stored build's folder: the commit's own, or, with `rebuild` (a run id), that content rebuild's, or a refresh's. */
 export const storedPrefix = (site, commit, rebuild = null) => prefixOf(site, commit, rebuild)
 export const manifestKey = (site, commit, rebuild = null) => `${prefixOf(site, commit, rebuild)}manifest.json`
 export const storedKey = (site, commit, file, rebuild = null) => `${prefixOf(site, commit, rebuild)}files/${file}`
@@ -63,8 +77,9 @@ export const CONTENT_SHA256 = /^[0-9a-f]{64}$/
 /**
  * @param {{ site: string, repo: string, commit: string, workflowSha: string, lockfileSha256: string,
  *   created: string, files: { path: string, size: number, sha256: string }[],
- *   rebuild?: { run: string, contentSha256: string | null } | null }} b `rebuild`: a content rebuild's run and the
- *   content hash platform sent (the manifest says which rebuild it is; a commit's first build has no such field)
+ *   rebuild?: { run: string, contentSha256: string | null } | null, refresh?: { run: string } | null }} b `rebuild`: a
+ *   content rebuild's run and the content hash platform sent; `refresh`: a data refresh's run (the manifest says which
+ *   it is; a commit's first build has neither field)
  */
 export function makeManifest(b) {
   const files = {}
@@ -78,13 +93,14 @@ export function makeManifest(b) {
     lockfile_sha256: b.lockfileSha256,
     created: b.created,
     ...(b.rebuild ? { rebuild: { run: checkRun(b.rebuild.run), content_sha256: b.rebuild.contentSha256 ?? null } } : {}),
+    ...(b.refresh ? { refresh: { run: checkRun(b.refresh.run) } } : {}),
     files,
   }
 }
 
 /**
- * Checks a stored manifest belongs to this site, repo and commit (and, with `rebuild`, to that content rebuild's run)
- * and is well-formed.
+ * Checks a stored manifest belongs to this site, repo and commit (and, with `rebuild`, to that content rebuild's run,
+ * or to a refreshRef's data refresh) and is well-formed.
  * @returns {{ path: string, size: number, sha256: string }[]} its files, sorted
  */
 export function readManifest(manifest, { site, repo, commit, rebuild = null }) {
@@ -93,8 +109,13 @@ export function readManifest(manifest, { site, repo, commit, rebuild = null }) {
   if (manifest?.site !== site) problems.push(`manifest is for site ${manifest?.site}, not ${site}`)
   if (manifest?.repo !== repo) problems.push(`manifest is for repo ${manifest?.repo}, not ${repo}`)
   if (manifest?.commit !== commit) problems.push(`manifest is for commit ${manifest?.commit}, not ${commit}`)
-  if ((manifest?.rebuild?.run ?? null) !== (rebuild ? String(rebuild) : null)) {
-    problems.push(rebuild ? `manifest isn't content rebuild ${rebuild}'s` : 'manifest is a content rebuild, not the commit\'s own build')
+  const rebuildRun = rebuild && !isRefreshRef(rebuild) ? String(rebuild) : null
+  const refreshRun = isRefreshRef(rebuild) ? String(rebuild.refresh) : null
+  if ((manifest?.rebuild?.run ?? null) !== rebuildRun) {
+    problems.push(rebuildRun ? `manifest isn't content rebuild ${rebuildRun}'s` : 'manifest is a content rebuild, not the commit\'s own build')
+  }
+  if ((manifest?.refresh?.run ?? null) !== refreshRun) {
+    problems.push(refreshRun ? `manifest isn't data refresh ${refreshRun}'s` : 'manifest is a data refresh, not the commit\'s own build')
   }
   const entries = Object.entries(manifest?.files ?? {})
   if (entries.length === 0) problems.push('manifest lists no files')

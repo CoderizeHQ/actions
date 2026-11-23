@@ -18,7 +18,18 @@ name: release
 # the site's distribution serves no name yet (before its alias move), or a content rebuild (the repository_dispatch
 # `content-rebuild` from the release App, as platform's content check, naming this site; scripts/lib/rebuild.mjs): the
 # commit live runs now, which verify finds and re-checks itself, published from the rebuild the same run's
-# deploy-preview job stored, and only to a distribution already serving the site; anything else is refused.
+# deploy-preview job stored, and only to a distribution already serving the site; or a data refresh (the
+# repository_dispatch `data-refresh` from the release App, as platform's refresh check, naming this site): the same
+# target, a go-live release's commit included when it is an approved release, published from the refresh the same
+# run's refresh-build and deploy-preview jobs built and stored (`refresh: true`), also to a distribution with no names
+# yet (an alias move under way); anything else is refused.
+#
+# A site with data refreshes (platform's `refresh` record field) releases with its feed data (README "Data
+# refreshes"): its platform-written release workflow calls this with `check-only: true` (verify alone; its
+# `refreshable` output says whether the run's commit may be built with the feed's secrets), then refresh-build.yml and
+# deploy-preview.yml, then this again with `refresh: true` and `refresh-results`, which publishes the run's stored
+# refresh of its own commit instead of the commit's first build, so a release never puts a build without the feed data
+# over a refreshed site.
 # `publish` then runs in the release environment as coderizehq-live-publish-<site> (its ARN comes from `site`), which
 # trusts only this file at v1 or v1.*: it publishes the build deploy-preview stored for that exact commit, checks it
 # on live, and records a GitHub deployment. IAM only lets it copy builds CI stored from main; that the build is the
@@ -38,6 +49,28 @@ on:
         description: The GitHub deployment environment the release is recorded under, live or live-<site>
         type: string
         default: live
+      check-only:
+        description: Only verify (a refresh site's release, before its refresh build); publish nothing, email only a refusal
+        type: boolean
+        default: false
+      refresh:
+        description: Publish this run's stored data refresh (refreshes/<run>/) of verify's commit instead of the commit's first build
+        type: boolean
+        default: false
+      refresh-results:
+        description: With refresh, how the run's refresh build and store jobs ended (build=<result>,store=<result>)
+        type: string
+        default: ''
+    outputs:
+      publish:
+        description: Whether verify accepted a publish ('true' or 'false')
+        value: ${{ jobs.verify.outputs.publish }}
+      commit:
+        description: The commit verify accepted
+        value: ${{ jobs.verify.outputs.commit }}
+      refreshable:
+        description: Whether that commit may be built with the site's feed secrets (an approved released commit)
+        value: ${{ jobs.verify.outputs.refreshable }}
 
 permissions:
   contents: read
@@ -55,6 +88,9 @@ jobs:
       deployments: read
     outputs:
       publish: ${{ steps.verify.outputs.publish }}
+      refreshable: ${{ steps.verify.outputs.refreshable }}
+      refresh: ${{ steps.verify.outputs.refresh }}
+      refresh-reason: ${{ steps.verify.outputs.refresh-reason }}
       kind: ${{ steps.verify.outputs.kind }}
       commit: ${{ steps.verify.outputs.commit }}
       rebuild-basis: ${{ steps.verify.outputs.rebuild-basis }}
@@ -117,13 +153,17 @@ jobs:
           SENDER: ${{ github.event.sender.login }}
           PAYLOAD_SITE: ${{ github.event.client_payload.site }}
           PAYLOAD_CONTENT: ${{ github.event.client_payload.content_sha256 }}
+          PAYLOAD_REASON: ${{ github.event.client_payload.reason }}
           DEPLOYMENT: ${{ inputs.deployment }}
+          CHECK_ONLY: ${{ inputs.check-only }}
+          REFRESH: ${{ inputs.refresh }}
+          REFRESH_RESULTS: ${{ inputs.refresh-results }}
         run: node actions/scripts/release.mjs verify
 
   publish:
     needs: verify
-    # Nothing merged since the last release: verify passed with nothing to publish.
-    if: needs.verify.outputs.publish == 'true'
+    # Nothing merged since the last release: verify passed with nothing to publish. A check-only call publishes nothing.
+    if: needs.verify.outputs.publish == 'true' && !inputs.check-only
     runs-on: ${{ vars.RUNNER_LABEL || 'ubuntu-26.04' }}
     # The live role trusts only jobs in this environment.
     environment: release
@@ -174,6 +214,9 @@ jobs:
           REBUILD_BASIS: ${{ needs.verify.outputs.rebuild-basis }}
           REBUILD_TAG: ${{ needs.verify.outputs.rebuild-tag }}
           CONTENT_SHA256: ${{ needs.verify.outputs.content-sha256 }}
+          # A data refresh, or a refresh site's release with its feed data: this run's stored refresh.
+          REFRESH_RUN: ${{ needs.verify.outputs.refresh == 'true' && github.run_id || '' }}
+          REFRESH_REASON: ${{ needs.verify.outputs.refresh-reason }}
           WORKFLOW_SHA: ${{ needs.verify.outputs.workflow-sha }}
           KIND: ${{ needs.verify.outputs.kind }}
           RELEASE_PR: ${{ needs.verify.outputs.release-pr }}
