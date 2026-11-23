@@ -34,6 +34,15 @@ name: release
 # trusts only this file at v1 or v1.*: it publishes the build deploy-preview stored for that exact commit, checks it
 # on live, and records a GitHub deployment. IAM only lets it copy builds CI stored from main; that the build is the
 # release James approved is what `verify` checks.
+#
+# A government site (platform's `"government": true` record, in the Government account): platform writes
+#   with: { site: emcog-org, account: government }
+# into every call of it. `publish` then assumes arn:aws:iam::355600359887:role/coderizehq-live-publish-<site>, reads the
+# build from that account's locked coderizehq-gov-builds-355600359887 and copies it into its locked
+# coderizehq-live-<site>, and never deletes: what the build no longer has stays on live, and a page it no longer has
+# refuses the release (nothing published) unless the site's redirect map sends that page's URL elsewhere (the record's
+# `redirects`, which platform's redirect sync writes into coderizehq-government-redirects, read from there). `account`
+# is live or government, checked before any AWS call; every other site passes nothing and gets live, unchanged.
 on:
   workflow_call:
     inputs:
@@ -61,6 +70,10 @@ on:
         description: With refresh, how the run's refresh build and store jobs ended (build=<result>,store=<result>)
         type: string
         default: ''
+      account:
+        description: The account the site is live in, live or government (platform writes government for a government record); government publishes there and never deletes
+        type: string
+        default: live
     outputs:
       publish:
         description: Whether verify accepted a publish ('true' or 'false')
@@ -108,6 +121,13 @@ jobs:
           SITE: ${{ inputs.site }}
         run: |
           [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
+
+      # It picks the publish role's account; the publish job checks it again before its credentials.
+      - name: Check the account
+        env:
+          ACCOUNT: ${{ inputs.account }}
+        run: |
+          [[ "$ACCOUNT" = live || "$ACCOUNT" = government ]] || { echo "::error::account must be live or government"; exit 1; }
 
       # A reusable workflow can't see its own ref, so ask GitHub which commit of this file the run uses, and load the
       # scripts from that same commit.
@@ -195,9 +215,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
         working-directory: actions
 
+      # The account map (scripts/lib/build.mjs ACCOUNTS): live is 243891826043, government 355600359887. Anything else
+      # fails here, before any AWS call.
+      - name: Pick the account
+        id: account
+        env:
+          ACCOUNT: ${{ inputs.account }}
+        run: |
+          case "$ACCOUNT" in
+            live) id=243891826043 ;;
+            government) id=355600359887 ;;
+            *) echo "::error::account must be live or government"; exit 1 ;;
+          esac
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
-          role-to-assume: arn:aws:iam::243891826043:role/coderizehq-live-publish-${{ inputs.site }}
+          role-to-assume: arn:aws:iam::${{ steps.account.outputs.id }}:role/coderizehq-live-publish-${{ inputs.site }}
           aws-region: us-east-1
 
       - name: Publish to live
@@ -206,6 +240,7 @@ jobs:
           SITE: ${{ inputs.site }}
           DEPLOYMENT: ${{ inputs.deployment }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
+          ACCOUNT: ${{ inputs.account }}
           REPO: ${{ github.repository }}
           # verify's commit: the run's own, except a content rebuild's (the live commit, stored as this run's rebuild).
           COMMIT: ${{ needs.verify.outputs.commit }}

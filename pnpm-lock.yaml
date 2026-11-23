@@ -178,6 +178,9 @@ importers:
       '@aws-sdk/client-cloudfront':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/client-cloudfront-keyvaluestore':
+        specifier: ^3.1169.0
+        version: 3.1169.0
       '@aws-sdk/client-ec2':
         specifier: ^3.1169.0
         version: 3.1169.0
@@ -193,6 +196,9 @@ importers:
       '@aws-sdk/client-ssm':
         specifier: ^3.1169.0
         version: 3.1169.0
+      '@aws-sdk/signature-v4a':
+        specifier: ^3.1138.0
+        version: 3.1138.0
       '@axe-core/playwright':
         specifier: 4.14.0
         version: 4.14.0(playwright-core@1.65.0)
@@ -204,6 +210,10 @@ packages:
 
   '@aws-sdk/checksums@3.1002.5':
     resolution: {integrity: sha512-OHlfkNzDFjYnwNPABhwAkDTUi0HPjfsKUHJDR0bSMORpCXNzRpInPCNCIT08xKDhjaPlcLJ+2Av+Sk7hHnuC8A==}
+    engines: {node: '>=20.0.0'}
+
+  '@aws-sdk/client-cloudfront-keyvaluestore@3.1169.0':
+    resolution: {integrity: sha512-xPPSdlTN3tzdYewHd8D9mSzjPMcjdmyspN817XFm/CI6ZULZEYkKZS4g3GsscgBrabRvdUs38XlXBNLJ6kcfCQ==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/client-cloudfront@3.1169.0':
@@ -282,6 +292,10 @@ packages:
     resolution: {integrity: sha512-6W6SjGc8OXUhMzNxU1X922ghD+PP1XvzmCk5Scui0jaYsLezycMYR1RaLp5xTIOUrhTXyb4DnAbPr3fBgmdnzg==}
     engines: {node: '>=20.0.0'}
 
+  '@aws-sdk/signature-v4a@3.1138.0':
+    resolution: {integrity: sha512-HMLRQOzl4KNOmP9vSZbY3AeKhhl4yG8ZSzVe4RuCsNfmcHZVB+BvuQ7dxvQByXr+caLzpfqGWkxMDNmdIfEb2Q==}
+    engines: {node: '>=20.0.0'}
+
   '@aws-sdk/token-providers@3.1166.0':
     resolution: {integrity: sha512-ngJ8mxXqtQ9mnp7QV6TWKJCxkpjVfPWxKQSc2FYhCyCfOVFIGdFv7P+/RqVffFrJAorwBPpktnv32gNlcEgF4g==}
     engines: {node: '>=20.0.0'}
@@ -324,6 +338,10 @@ packages:
     resolution: {integrity: sha512-WPjdr5oWOk1LArpI4pavu+fSo+/evi0Re1olxGvqwuZopd4gYR1UGCi+Soyn/IjmafqbWs+ZC+3AKxJS3ZpwUg==}
     engines: {node: '>=18.0.0'}
 
+  '@smithy/signature-v4a@3.6.2':
+    resolution: {integrity: sha512-M5CXsK13/spy3QNudWMdcccGZFU4AKV4/7ixZ4heoowpSgJwOWcfvrHPFTekxaOmrpFA4is/of6B1OPdPz/9Yg==}
+    engines: {node: '>=18.0.0'}
+
   '@smithy/types@4.20.0':
     resolution: {integrity: sha512-lCA6QG22dPk9ecHbv91jDQZsmtPUjdS1aE2Il6NNPqe7DrYc0dZQi6DhcESk2KYXH2sp5xbAcGdYMZDFnuzA2A==}
     engines: {node: '>=18.0.0'}
@@ -355,6 +373,18 @@ snapshots:
       '@aws-sdk/core': 3.981.0
       '@aws-sdk/types': 3.975.1
       '@smithy/core': 3.40.0
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@aws-sdk/client-cloudfront-keyvaluestore@3.1169.0':
+    dependencies:
+      '@aws-sdk/core': 3.981.0
+      '@aws-sdk/credential-provider-node': 3.972.97
+      '@aws-sdk/signature-v4-multi-region': 3.996.52
+      '@aws-sdk/types': 3.975.1
+      '@smithy/core': 3.40.0
+      '@smithy/fetch-http-handler': 5.8.1
+      '@smithy/node-http-handler': 4.14.2
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
@@ -560,6 +590,11 @@ snapshots:
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 
+  '@aws-sdk/signature-v4a@3.1138.0':
+    dependencies:
+      '@smithy/signature-v4a': 3.6.2
+      tslib: 2.9.1
+
   '@aws-sdk/token-providers@3.1166.0':
     dependencies:
       '@aws-sdk/core': 3.981.0
@@ -612,6 +647,13 @@ snapshots:
   '@smithy/signature-v4@5.7.5':
     dependencies:
       '@smithy/core': 3.40.0
+      '@smithy/types': 4.20.0
+      tslib: 2.9.1
+
+  '@smithy/signature-v4a@3.6.2':
+    dependencies:
+      '@smithy/core': 3.40.0
+      '@smithy/signature-v4': 5.7.5
       '@smithy/types': 4.20.0
       tslib: 2.9.1
 

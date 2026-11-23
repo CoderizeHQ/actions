@@ -54,8 +54,8 @@ required workflow that isn't there blocks every PR it covers.
 | `ci-site.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `indexed` (`true`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
 | `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `min-pages` (1), `pages-per-template` (3; 0 scans every page) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
-| `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds); a site's refresh and release workflows (Data refreshes) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild and refresh workflows only), `refresh-lockfile-sha256` (empty; a data refresh's store only) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main, and (for a refresh site's release storing its refresh) its version tags; `notify` uses `coderizehq-notify-send` (Notifications) |
-| `release.yml` | site, version tag or weekly on main; a site's rebuild and refresh workflows | `site`, `max-delete-share` (`0.25`), `deployment` (`live`), `check-only`, `refresh` (`false`), `refresh-results` (empty); outputs `publish`, `commit`, `refreshable` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
+| `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds); a site's refresh and release workflows (Data refreshes) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild and refresh workflows only), `refresh-lockfile-sha256` (empty; a data refresh's store only), `account` (`live`; `government` for a government site) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main, and (for a refresh site's release storing its refresh) its version tags; `notify` uses `coderizehq-notify-send` (Notifications) |
+| `release.yml` | site, version tag or weekly on main; a site's rebuild and refresh workflows | `site`, `max-delete-share` (`0.25`), `deployment` (`live`), `check-only`, `refresh` (`false`), `refresh-results` (empty), `account` (`live`; `government` for a government site); outputs `publish`, `commit`, `refreshable` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
 | `rebuild-target.yml` | a site's rebuild or refresh workflow (Content rebuilds, Data refreshes) | `site`, `deployment` (`live`); output `commit` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: read` | None: no AWS, no writes. Finds the commit a content rebuild or data refresh builds |
 | `refresh-build.yml` | a site's refresh and release workflows (Data refreshes) | `site`, `package` (empty), `build-dir` (`dist`), `commit`, `environment`, `secret-names`; output `lockfile-sha256`; `secrets: inherit` | `contents: read` | None: no AWS (no `id-token`), stores nothing. The only job a site's feed secrets reach, from its refresh environment, and only its build step |
 | `build-app-image.yml` | an app repo, every PR and push to main | `app`, `package`, `entry` | `contents: read`, `actions: read`, `id-token: write` | Builds the app's linux/arm64 image without Docker (crane on a pinned Node base); on main, `coderizehq-app-build-<app>` pushes it to ECR tagged with the commit. That role trusts only this file at `v1`/`v1.*`, from the app repo's main (platform `docs/apps.md`) |
@@ -63,8 +63,9 @@ required workflow that isn't there blocks every PR it covers.
 | `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
 
 Role ARNs are always derived from `site` (`arn:aws:iam::798070830797:role/coderizehq-preview-deploy-<site>`,
-`arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>`); no workflow takes an ARN as an input. `site` must be 1
-to 38 of `a-z`, `0-9` and `-` (the role names must fit IAM's 64 characters).
+`arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>`), and for a government site from `account` too
+(`arn:aws:iam::355600359887:role/coderizehq-live-publish-<site>`; Government sites, below); no workflow takes an ARN as
+an input. `site` must be 1 to 38 of `a-z`, `0-9` and `-` (the role names must fit IAM's 64 characters).
 
 ### ci-site
 
@@ -136,7 +137,8 @@ so its PRs run on GitHub-hosted runners and exercise the fallback end to end:
 1. `build` (no credentials): `pnpm install --frozen-lockfile`, `pnpm run build`, the build uploaded as an artifact. The
    lockfile's SHA-256 is taken before anything from the site runs.
 2. `deploy` (the preview role; one queue per site, a running deploy is never cancelled, the newest waiting one wins):
-   - stores the build in `coderizehq-previews-798070830797` at `_builds/<site>/<commit>/files/<path>`, every write
+   - stores the build in `coderizehq-previews-798070830797` (a government site: `coderizehq-gov-builds-355600359887`,
+     Government sites below) at `_builds/<site>/<commit>/files/<path>`, every write
      `If-None-Match: *` with its SHA-256 checksum; an existing complete build for the commit (its `manifest.json` is
      there) is reused, not an error;
    - writes `_builds/<site>/<commit>/manifest.json` last (the contract's format, with `workflow_sha` from the job's OIDC
@@ -198,7 +200,8 @@ still names the run's own commit, which the deploy role trusts as before.
    - downloads every stored file and checks its size and SHA-256 against the manifest;
    - copies each file with one CopyObject from `_builds/<site>/<commit>/files/` (the only writes the live role may
      make; never a multipart copy, which IAM refuses), deletes what the build doesn't have (same mass-delete guard),
-     then checks the bucket holds exactly the build (sizes and MD5 ETags of the checked bytes);
+     then checks the bucket holds exactly the build (sizes and MD5 ETags of the checked bytes). A government site
+     deletes nothing and refuses a dropped page without a redirect (Government sites, below);
    - invalidates `/*` and waits, then checks the live home page and robots.txt are this build's bytes, robots.txt
      doesn't block every crawler and names a sitemap on the site's own host, and the sitemap answers. A site whose
      home page comes back with `X-Robots-Tag: noindex` is noindex on purpose (that header comes only from platform's
@@ -208,6 +211,56 @@ still names the run's own commit, which the deploy role trusts as before.
 3. `notify`: emails ops@coderize.dev when `publish` succeeded, or when `verify` or `publish` failed (a refusal
    included, with its reasons). Nothing is sent when there was nothing to publish, or for a run on a ref release can
    never take (neither a version tag nor main).
+
+### Government sites
+
+A government site (platform's `"government": true` record, in the Government account 355600359887, built by platform's
+`aws/government`) holds public records, which are never deleted, only archived. Platform writes `account: government`
+into every call the site's workflows make to `deploy-preview.yml` and `release.yml` (its deploy, release, rebuild and
+refresh workflows). Every other site passes nothing and gets `account: live`, which behaves exactly as before. The
+value is `live` or `government`; anything else fails the job's first step, before any AWS call. The account map is
+`ACCOUNTS` in `scripts/lib/build.mjs` (live 243891826043, government 355600359887); `release.yml`'s `Pick the account`
+step repeats it, and a test keeps the two the same.
+
+| | `account: live` (the default) | `account: government` |
+| --- | --- | --- |
+| deploy-preview stores the build in | `coderizehq-previews-798070830797` | `coderizehq-gov-builds-355600359887` (Object-Locked, governance, 7 years), same `_builds/<site>/<commit>/` layout, same write-once rules |
+| deploy-preview's role | `coderizehq-preview-deploy-<site>` (798070830797) | the same role, which platform lets write and read its own `_builds/<site>/` in the government bucket |
+| the preview | `https://<site>.preview.coderize.dev`, copied from the stored build | the same, copied across accounts from the government bucket |
+| release's role | `arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>` | `arn:aws:iam::355600359887:role/coderizehq-live-publish-<site>` |
+| release copies from / into | the preview account's builds / `coderizehq-live-<site>` | the government builds / `coderizehq-live-<site>` in 355600359887 (Object-Locked) |
+| what the build no longer has | deleted, refusing a drop of more than `max-delete-share` (25%) | **never deleted** (below); `max-delete-share` has nothing to guard |
+| the deployment record's payload | as before | adds `"account": "government"` |
+
+**Never delete.** A government release deletes nothing from live:
+
+- a file the build no longer has (an old hashed bundle, an image, a document) stays in the live bucket, and its URL
+  keeps answering;
+- a page (an `.html` or `.htm` object) the build no longer has refuses the release, before anything is copied or
+  written and with every such page listed, unless the site's redirect map has an entry for the page's URL (the router's
+  URL for it, with no trailing slash: `/` for `index.html`, `/<dir>` for `<dir>/index.html`, `/<key>` for any other
+  page). The router keys the map by the path as the browser sent it, so the key is matched raw, with each segment
+  through `encodeURIComponent`, or as a browser encodes it (spaces and unicode encoded, `#` and `?` as `%23` and `%3F`,
+  other reserved characters left alone); the refusal lists each page in that last form. A redirected page stays in the bucket too, and the router answers its URL with
+  the 301 before the file is ever reached (it reads the redirect map before any file). To drop a page, add a redirect
+  for it to the record's `redirects` (platform `sites/<site>.json`), apply, then release. The kept page is still in
+  the bucket, so every later release checks its redirect again: taking the redirect out would serve the old page again,
+  and is refused the same way;
+- the check after the copy allows exactly the kept objects beside the build; the summary counts them.
+
+The redirect map comes from where the router reads it: platform's redirect sync writes each government record's
+`redirects` into the CloudFront KeyValueStore `coderizehq-government-redirects` (key `<apex><path>`). Release reads it
+only when a page is dropped: `cloudfront:DescribeKeyValueStore` finds its ARN by name, then
+`cloudfront-keyvaluestore:ListKeys`, 50 keys a call, keeping the keys whose apex, dots as hyphens, is the site name. So
+a page can only be dropped once its redirect is really served, not merely written in a file. The KeyValueStore API is
+signed with SigV4A, which `@aws-sdk/signature-v4a` (pure JS, imported by `scripts/lib/aws.mjs`) provides.
+
+**Object Lock.** S3 refuses an upload to a bucket with a default retention unless it carries a checksum header. Every
+PutObject here already names its SHA-256 (`x-amz-checksum-sha256`), and the S3 client pins the SDK's own default
+(`requestChecksumCalculation: 'WHEN_SUPPORTED'`) so a runner's `AWS_REQUEST_CHECKSUM_CALCULATION=WHEN_REQUIRED` can't
+turn it off. A copy into a government bucket also asks S3 for the copy's SHA-256 (`x-amz-checksum-algorithm: SHA256`);
+a live site's copy request is unchanged. `scripts/government.test.mjs` checks both on the wire through the SDK, and the
+in-memory store refuses an upload or copy into a locked bucket without one, and any delete there.
 
 ### Content rebuilds
 
@@ -385,7 +438,11 @@ says how many pages were built and how many scanned, with a row per sampled fami
 ## Not done yet
 
 - The canary covers `deploy-preview` only; `release.yml`, `ci-site` and `axe` on the canary channel come later
-  (platform's `docs/release-safety.md`).
+  (platform's `docs/release-safety.md`). So release's `account` input and never delete (Government sites) are proved by
+  the tests, not by a canary run.
+- ci-tofu's trust probe (`scripts/trustProbe.mjs`) tries live publish roles in the live account only, so a government
+  site's `coderizehq-live-publish-<site>` in 355600359887 isn't probed yet (platform's `aws/trust` tests its policy);
+  probing it needs `coderizehq-infra-plan` in that account and the trust job given its credentials.
 - ci-tofu's plans of roots that use the Cloudflare or GitHub provider need platform's `CLOUDFLARE_READ_TOKEN` and
   `PLATFORM_READ_APP_KEY` secrets and `PLATFORM_READ_APP_CLIENT_ID` variable (platform's README says what they are);
   until then those plans are skipped.

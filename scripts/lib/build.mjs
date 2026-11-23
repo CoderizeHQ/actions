@@ -3,9 +3,35 @@
 
 export const PREVIEW_ACCOUNT = '798070830797'
 export const LIVE_ACCOUNT = '243891826043'
+// The Government account (platform aws/government): government sites' stored builds and live hosting, every bucket
+// Object-Locked (governance, 7 years).
+export const GOVERNMENT_ACCOUNT = '355600359887'
 export const PREVIEW_BUCKET = `coderizehq-previews-${PREVIEW_ACCOUNT}`
+export const GOVERNMENT_BUILDS_BUCKET = `coderizehq-gov-builds-${GOVERNMENT_ACCOUNT}`
+// The government redirect store (platform aws/government/hosting.tf): key "<apex><path>", filled from each live
+// government record's `redirects` by platform's redirect sync, read by the government router.
+export const GOVERNMENT_REDIRECT_STORE = 'coderizehq-government-redirects'
 // The one preview distribution answering *.preview.coderize.dev (contract, "Accounts and existing pieces").
 export const PREVIEW_DISTRIBUTION = 'ENVVLCNVOIDL8'
+
+// The account a site is published in, as deploy-preview's and release's `account` input names it (platform writes
+// `account: government` for a government record; every other site passes nothing and gets `live`). Each maps to the
+// account its live bucket and publish role are in, and to the bucket its builds are stored in. Previews are always in
+// the preview account.
+export const ACCOUNTS = Object.freeze({
+  live: Object.freeze({ id: LIVE_ACCOUNT, builds: PREVIEW_BUCKET, neverDelete: false }),
+  government: Object.freeze({ id: GOVERNMENT_ACCOUNT, builds: GOVERNMENT_BUILDS_BUCKET, neverDelete: true }),
+})
+
+/** `account` is live or government; a missing one is live. Anything else (an empty string included) is refused. */
+export function checkAccount(account) {
+  const name = account ?? 'live'
+  if (!Object.hasOwn(ACCOUNTS, name)) throw new Error(`account must be live or government (got ${JSON.stringify(account)})`)
+  return name
+}
+
+/** Where a site's builds are stored: the preview account's bucket, or a government site's locked bucket. */
+export const buildsBucket = (account = 'live') => ACCOUNTS[checkAccount(account)].builds
 
 // At most 38 characters: coderizehq-preview-deploy-<site> must fit IAM's 64-character role names.
 const SITE = /^[a-z0-9-]{1,38}$/
@@ -23,7 +49,8 @@ export function checkSha(sha, what = 'commit') {
 }
 
 export const previewRoleArn = (site) => `arn:aws:iam::${PREVIEW_ACCOUNT}:role/coderizehq-preview-deploy-${checkSite(site)}`
-export const liveRoleArn = (site) => `arn:aws:iam::${LIVE_ACCOUNT}:role/coderizehq-live-publish-${checkSite(site)}`
+export const liveRoleArn = (site, account = 'live') =>
+  `arn:aws:iam::${ACCOUNTS[checkAccount(account)].id}:role/coderizehq-live-publish-${checkSite(site)}`
 export const liveBucket = (site) => `coderizehq-live-${checkSite(site)}`
 
 // The stored build: _builds/<site>/<commit>/manifest.json, with the files under files/. The contract puts files and
@@ -154,6 +181,73 @@ export function deleteGuard({ current, deletes, maxShare = DEFAULT_MAX_DELETE_SH
     `would delete ${deletes} of ${current} files (more than ${Math.round(maxShare * 100)}%); refusing. ` +
     "If that's intended, raise max-delete-share in the site's workflow for one run"
   )
+}
+
+// Never delete (a government site, platform's `"government": true` records in the Government account): its releases
+// delete nothing from live. An object the new build no longer has stays where it is, so its URL keeps answering, except
+// a page (an .html object), which must not be left serving content the site has dropped: the release is refused unless
+// the record has a redirect for the page's URL, which the router then answers with a 301 before the old object is ever
+// reached (the redirect map is read before any file, platform's router.js).
+
+/** A page is an HTML object (.html or .htm); everything else (assets, documents, images) is a file. */
+export const isPage = (key) => /\.html?$/i.test(key)
+
+/**
+ * The URL a page is served at, as the router maps paths to objects: index.html is /, <dir>/index.html is /<dir> (the
+ * router strips a trailing slash and serves /<dir>/index.html), and any other object is /<key>.
+ */
+export function pageUrl(key) {
+  if (key === 'index.html') return '/'
+  if (key.endsWith('/index.html')) return `/${key.slice(0, -'/index.html'.length)}`
+  return `/${key}`
+}
+
+/**
+ * The forms a page's URL can take as a redirect key. The router keys the map by the request's path as the browser sent
+ * it (percent-encoded, never decoded), and a record's path can hold no space, `?` or `#`, so /Board Minutes.html is
+ * /Board%20Minutes.html there and old#page.html is /old%23page.html. The forms, each segment encoded and `/` kept:
+ * - the raw path, for a key with nothing to encode;
+ * - each segment through encodeURIComponent (`#`, `?`, spaces, unicode, and also `,` `;` `=` `&` `+` `$` `@` `:`);
+ * - the way a browser sends it: encodeURI's encoding (spaces and unicode, reserved characters left alone), with `#`
+ *   and `?` encoded too, since sent raw they would end the path.
+ * @returns {string[]} the distinct forms
+ */
+export function redirectKeys(url) {
+  const component = url.split('/').map((s) => encodeURIComponent(s)).join('/')
+  return [...new Set([url, component, redirectKey(url)])]
+}
+
+/** A page URL as a browser requests it, so as a record's redirect key should name it (redirectKeys). */
+export const redirectKey = (url) =>
+  url
+    .split('/')
+    .map((s) => encodeURI(s).replaceAll('#', '%23').replaceAll('?', '%3F'))
+    .join('/')
+
+/**
+ * Whether `redirects` (the site's redirect map: path -> target) covers a dropped page: an entry for the page's URL in
+ * any of the forms the router can see it in (redirectKeys).
+ * @param {Map<string, string>} redirects
+ */
+export function redirectCovers(redirects, key) {
+  return redirectKeys(pageUrl(key)).some((k) => redirects.has(k))
+}
+
+/**
+ * What a never-delete release does with what the build no longer has.
+ * @param {string[]} dropped keys live has that the build doesn't
+ * @param {Map<string, string> | null} redirects the site's redirect map (needed only when a page is dropped)
+ * @returns {{ kept: string[], redirected: string[], refused: string[] }} every dropped key is kept; `refused` lists the
+ *   pages with no redirect (the release must stop), `redirected` the pages a redirect covers
+ */
+export function neverDeletePlan(dropped, redirects) {
+  const pages = dropped.filter(isPage)
+  const covered = (k) => Boolean(redirects) && redirectCovers(redirects, k)
+  return {
+    kept: [...dropped],
+    redirected: pages.filter(covered),
+    refused: pages.filter((k) => !covered(k)),
+  }
 }
 
 /** Runs `fn` over `items` with at most `limit` in flight; rejects on the first failure. */

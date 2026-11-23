@@ -25,6 +25,14 @@ name: deploy-preview
 # write-once under _builds/<site>/<commit>/refreshes/<run id>/ for the same run's release job, and leaves the preview
 # alone. It runs on main (the data-refresh dispatch, a weekly or go-live release) or on a version tag (a release), and
 # its queue is its own too.
+#
+# A government site (platform's `"government": true` record, in the Government account): platform writes
+#   with: { site: emcog-org, account: government }
+# into every call of it (deploy, rebuild and refresh workflows alike). Its builds are then stored, the same way and
+# write-once, in that account's Object-Locked coderizehq-gov-builds-355600359887 instead of the preview account's
+# bucket, by the same preview deploy role (which platform lets write and read its own _builds/<site>/ there); its
+# preview is still published to https://<site>.preview.coderize.dev, copied from there. `account` is live or
+# government, checked before any AWS call; every other site passes nothing and gets live.
 on:
   workflow_call:
     inputs:
@@ -52,6 +60,10 @@ on:
         description: A data refresh's lockfile hash (refresh-build.yml's output); with it, store that run's refresh build instead of building
         type: string
         default: ''
+      account:
+        description: The account the site is published in, live or government (platform writes government for a government record); government stores the build in that account's locked bucket
+        type: string
+        default: live
 
 permissions:
   contents: read
@@ -70,6 +82,13 @@ jobs:
           SITE: ${{ inputs.site }}
         run: |
           [[ "$SITE" =~ ^[a-z0-9-]{1,38}$ ]] || { echo "::error::site must be 1 to 38 of a-z, 0-9 and -"; exit 1; }
+
+      # It picks the bucket the build is stored in; the deploy job checks it again before its credentials.
+      - name: Check the account
+        env:
+          ACCOUNT: ${{ inputs.account }}
+        run: |
+          [[ "$ACCOUNT" = live || "$ACCOUNT" = government ]] || { echo "::error::account must be live or government"; exit 1; }
 
       # deploy-preview builds on main only: a version tag runs it only to store a data refresh's build (the deploy job,
       # with refresh-lockfile-sha256), never this build-and-publish path.
@@ -155,6 +174,13 @@ jobs:
       actions: read
       id-token: write
     steps:
+      # Before any AWS call (the build job, which checks it too, is skipped for a data refresh's store).
+      - name: Check the account
+        env:
+          ACCOUNT: ${{ inputs.account }}
+        run: |
+          [[ "$ACCOUNT" = live || "$ACCOUNT" = government ]] || { echo "::error::account must be live or government"; exit 1; }
+
       # Only a data refresh's or a refresh site's release run stores a build it didn't make here: on main or a version
       # tag, with the commit and lockfile hash refresh-build reported.
       - name: Check the refresh store
@@ -234,6 +260,7 @@ jobs:
           WORKFLOW_SHA: ${{ steps.self.outputs.sha }}
           PUBLISH: ${{ steps.head.outputs.publish }}
           MAX_DELETE_SHARE: ${{ inputs.max-delete-share }}
+          ACCOUNT: ${{ inputs.account }}
         run: node actions/scripts/deployPreview.mjs
 
   # Emails ops@coderize.dev when the build or the deploy fails (email only, C955 a; a passing preview sends nothing).
