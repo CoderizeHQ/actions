@@ -84,7 +84,7 @@ jobs:
         uses: pnpm/setup@731dfb6463bbd11c11fd0ee11fe00ed0e36d48a1 # v3.2.0
         with:
           # platform has no package.json to read a pnpm version from.
-          version: 12.20.0
+          version: 12.22.0
           runtime: node@26
           install: false
 
@@ -241,7 +241,7 @@ jobs:
 
       # GitHub settings are read as the coderizehq-platform-read App (read-only permissions), never the platform App,
       # whose key lives only in the apply environment.
-      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         id: read-app
         if: env.HAS_READ_APP == 'true'
         with:
