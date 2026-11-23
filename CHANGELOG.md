@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/CoderizeHQ/actions/compare/v1.10.0...v1.11.0) (2026-11-23)
+
+
+### Features
+
+* refresh a site's feed data by rebuilding its released commit with named secrets, and release it with its data ([#55](https://github.com/CoderizeHQ/actions/issues/55)) ([c430a05](https://github.com/CoderizeHQ/actions/commit/c430a0581096b5967ecd88b7fb474844b77bbb2a))
+
 ## [1.10.0](https://github.com/CoderizeHQ/actions/compare/v1.9.0...v1.10.0) (2026-11-22)
 
 
