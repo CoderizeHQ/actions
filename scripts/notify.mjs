@@ -4,10 +4,14 @@
 // coderizehq-notify configuration set, as coderizehq-notify-send: platform's role that may send only from that address
 // to ops@ (platform, aws/live/notify.tf). Its ARN is fixed here and in the workflows, never an input.
 //
+// Two exceptions, both decided by `node notify.mjs decide` before any AWS (release.yml's notify job; shouldEmail below):
+// a weekly dependency run held for James emails nothing, since platform's weekly digest lists every held site once a
+// week, and a run of GitHub's backup cron that repeats one this week's slot already had emails nothing either.
+//
 // `node notify.mjs` reads the run from the environment (see main below).
 
 import { LIVE_ACCOUNT } from './lib/build.mjs'
-import { runIfMain } from './lib/report.mjs'
+import { output, runIfMain, summary } from './lib/report.mjs'
 
 export const FROM = 'CoderizeHQ <notify@notify.coderize.dev>'
 export const TO = 'ops@coderize.dev'
@@ -85,6 +89,96 @@ export function message(run) {
   return { ok, subject: subject.slice(0, 200), text: `${lines.join('\n')}\n` }
 }
 
+// --- Whether a release run emails at all (`node notify.mjs decide`, release.yml's notify job, before any AWS) ---
+
+/** The weekly dependency run platform's release-bootstrap starts (its scripts/siteReleases.mjs), as the release App. */
+export const WEEKLY_DISPATCH = { action: 'weekly-dependency-release', sender: 'coderizehq-release[bot]' }
+
+/** Whether the run is the automatic weekly dependency run: GitHub's cron, or platform's dispatch. Not a hand start. */
+export function isWeeklyRun({ event, dispatch, sender }) {
+  return event === 'schedule' || (event === 'repository_dispatch' && dispatch === WEEKLY_DISPATCH.action && sender === WEEKLY_DISPATCH.sender)
+}
+
+/**
+ * The start of the slot a weekly cron (`m h * * d`, as platform writes into each site's release.yml) last named at or
+ * before `at`; null for any other form, which then never counts as a repeat.
+ * @param {string | undefined} cron @param {Date} at
+ */
+export function cronSlot(cron, at) {
+  const m = /^\s*(\d{1,2})\s+(\d{1,2})\s+\*\s+\*\s+([0-7])\s*$/.exec(cron ?? '')
+  if (!m || Number.isNaN(at.getTime())) return null
+  const [minute, hour, day] = m.slice(1).map(Number)
+  if (minute > 59 || hour > 23) return null
+  const d = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate(), hour, minute))
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() - (day % 7) + 7) % 7))
+  if (d > at) d.setUTCDate(d.getUTCDate() - 7)
+  return d
+}
+
+/** Events whose run on main is that slot's dependency run (platform's countsAsWeeklyRun counts the same ones). */
+function isEarlierWeekly(r) {
+  if (r.event === 'schedule' || r.event === 'workflow_dispatch') return true
+  return r.event === 'repository_dispatch' && (r.triggering_actor?.login ?? r.actor?.login) === WEEKLY_DISPATCH.sender
+}
+
+/**
+ * The run a cron run repeats, or null: an earlier run of the same release workflow on main in the same weekly slot,
+ * finished, for the same commit, that ended as this one did. GitHub's cron stays in each site's release.yml as a
+ * backup and often fires hours after platform's dispatch already ran the week's release; that dispatch's email said
+ * it all. A different commit (something merged in between) or a different outcome still emails.
+ * @param {{ run: { id: number, created_at: string, head_sha: string }, runs: any[], slot: Date, ok: boolean }} f
+ */
+export function repeatedRun({ run, runs, slot, ok }) {
+  const created = Date.parse(run.created_at)
+  const want = ok ? 'success' : 'failure'
+  return (
+    runs.find(
+      (r) =>
+        r.id !== run.id &&
+        (r.head_branch ?? 'main') === 'main' &&
+        Date.parse(r.created_at) >= slot.getTime() &&
+        Date.parse(r.created_at) < created &&
+        r.head_sha === run.head_sha &&
+        r.status === 'completed' &&
+        r.conclusion === want &&
+        isEarlierWeekly(r),
+    ) ?? null
+  )
+}
+
+/**
+ * Whether to email (pure). A weekly run whose release is held for James (verify's `hold`) sends nothing: a hold isn't an
+ * error, and platform's weekly digest lists every held site once a week. A hand-started run still emails its hold.
+ * A cron run that repeats this slot's run (`repeated`) sends nothing either. Everything else emails as before.
+ * @returns {{ send: boolean, why: string }}
+ */
+export function shouldEmail({ event, dispatch, sender, hold, repeated = null }) {
+  if (hold === 'true' && isWeeklyRun({ event, dispatch, sender })) {
+    return { send: false, why: "the weekly dependency run is held for James; platform's weekly digest lists it" }
+  }
+  if (repeated) return { send: false, why: `GitHub's cron repeated run ${repeated.id} of this week's slot, for the same commit and with the same result, which already emailed` }
+  return { send: true, why: 'emailing ops@' }
+}
+
+/**
+ * Reads what shouldEmail needs from GitHub: only a cron run is looked up (its run, and the release workflow's runs on
+ * main since its slot). `api` is lib/github.mjs's gh and ghAll, bound to the token.
+ */
+export async function decide(env, api) {
+  const base = { event: env.EVENT, dispatch: env.DISPATCH, sender: env.SENDER, hold: env.HOLD }
+  const first = shouldEmail(base)
+  if (!first.send || env.EVENT !== 'schedule') return first
+  const run = await api.get(`/repos/${env.REPO}/actions/runs/${env.RUN_ID}`)
+  const slot = run ? cronSlot(env.SCHEDULE, new Date(run.created_at)) : null
+  if (!slot) return first
+  const runs = await api.all(
+    `/repos/${env.REPO}/actions/workflows/${run.workflow_id}/runs?branch=main&created=${encodeURIComponent(`>=${slot.toISOString()}`)}`,
+    (p) => p?.workflow_runs ?? [],
+  )
+  const ok = !parseResults(env.RESULTS).some((j) => BAD.has(j.result))
+  return shouldEmail({ ...base, repeated: repeatedRun({ run, runs, slot, ok }) })
+}
+
 /** Sends `message(run)` to ops@ with `mailer` (lib/aws.mjs's awsMailer, or a fake). */
 export async function notify(run, mailer) {
   const m = message(run)
@@ -94,6 +188,21 @@ export async function notify(run, mailer) {
 
 runIfMain(import.meta.url, async () => {
   const env = process.env
+  if (process.argv[2] === 'decide') {
+    // A lookup that fails emails anyway: a missed email is worse than a repeated one.
+    let d
+    try {
+      const { gh, ghAll } = await import('./lib/github.mjs')
+      d = await decide(env, { get: (p) => gh(env.GH_TOKEN, p), all: (p, pick) => ghAll(env.GH_TOKEN, p, pick) })
+    } catch (err) {
+      console.log(`::warning::couldn't tell whether this run repeats an earlier one (${clean(err.message, 200)}); emailing`)
+      d = { send: true, why: 'emailing ops@' }
+    }
+    output('send', String(d.send))
+    console.log(d.why)
+    if (!d.send) summary(`No email: ${d.why}.`)
+    return
+  }
   const run = {
     workflow: env.WORKFLOW,
     site: env.SITE,

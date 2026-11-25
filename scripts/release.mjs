@@ -109,6 +109,18 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  */
 export const GO_LIVE = { action: 'go-live-release', senders: ['coderizehq-platform[bot]'] }
 
+/**
+ * The line verify prints for a hold (a run on main whose dependency-only release is left for James), then one line of
+ * JSON `{ reasons, base }`. Platform's weekly digest (its scripts/siteReleases.mjs) reads it from the verify job's log:
+ * nothing outside a run can read its step outputs. It is never a workflow command.
+ */
+export const HOLD_MARKER = 'release-hold: '
+
+/** A hold's marker line for the log. */
+export function holdLine({ reasons, base = null }) {
+  return `${HOLD_MARKER}${JSON.stringify({ reasons, base })}`
+}
+
 /** How a release run's refresh build and store jobs must end for it to publish their refresh (refresh-results). */
 export const REFRESH_RESULTS_OK = 'build=success,store=success'
 
@@ -212,7 +224,9 @@ async function decide({
   if (ref === 'refs/heads/main') {
     const r = await checks.checkDependencyRun(token, repo, sha)
     if (r.nothing) return { publish: false, reasons: [], nothing: true }
-    if (!r.ok) return { publish: false, reasons: [...r.reasons, 'dependency-only release left for James'] }
+    // A hold, not an error: the gap waits for James's release PR. `hold` and `base` (the last version tag) only say
+    // so, for notify.mjs and the weekly digest; publish and reasons are the same as ever.
+    if (!r.ok) return { publish: false, hold: true, base: r.base?.tag ?? null, reasons: [...r.reasons, 'dependency-only release left for James'] }
     return { publish: true, kind: 'dependency', refreshable: true, pr: null, approver: null, prs: r.prs, reasons: [] }
   }
   return { publish: false, reasons: [`release runs only for a version tag (vX.Y.Z) or main, not ${ref}`] }
@@ -590,7 +604,15 @@ async function verifyMain() {
     for (const r of result.reasons) console.log(`::error::${r}`)
     // For the email (notify.mjs): one line, since a step output is one line.
     output('reasons', result.reasons.join('; ').replace(/\s+/g, ' '))
-    summary(`### Release refused\n\n${result.reasons.map((r) => `- ${r}`).join('\n')}`)
+    const listed = result.reasons.map((r) => `- ${r}`).join('\n')
+    if (result.hold) {
+      // Still a failed run, so main's release shows it isn't released; the weekly run's notify emails nothing for it.
+      output('hold', 'true')
+      console.log(holdLine(result))
+      summary(`### Held for James\n\n${listed}\n\nThe weekly run emails nothing for a hold: platform's weekly digest lists every held site once a week.`)
+    } else {
+      summary(`### Release refused\n\n${listed}`)
+    }
     process.exit(1)
   }
   // What publish publishes: the run's own commit, or, for a content rebuild, the live commit verify found.
