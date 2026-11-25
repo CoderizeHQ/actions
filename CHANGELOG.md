@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/CoderizeHQ/actions/compare/v1.12.1...v1.13.0) (2026-11-25)
+
+
+### Features
+
+* send no per-site email for a held weekly release or the backup cron's repeat ([#62](https://github.com/CoderizeHQ/actions/issues/62)) ([d6c45ec](https://github.com/CoderizeHQ/actions/commit/d6c45ec0cdcfe9a89be70cc1372a5e710b9c1325))
+
 ## [1.12.1](https://github.com/CoderizeHQ/actions/compare/v1.12.0...v1.12.1) (2026-11-23)
 
 
