@@ -9,13 +9,14 @@ import {
   CONFIGURATION_SET,
   cronSlot,
   decide,
+  emailed,
   FROM,
   isWeeklyRun,
   message,
   NOTIFY_ROLE_ARN,
   notify,
   parseResults,
-  repeatedRun,
+  repeatCandidates,
   shouldEmail,
   TO,
 } from './notify.mjs'
@@ -183,19 +184,21 @@ test("cronSlot: the latest time a weekly 'm h * * d' cron named at or before the
   }
 })
 
-test("repeatedRun: the cron repeats this slot's earlier weekly run on main for the same commit with the same result", () => {
+test("repeatCandidates: this slot's earlier weekly runs on main for the same commit with the same result, newest first", () => {
   const slot = new Date('2026-11-24T09:37:00Z')
   const runs = [slotRun(), { ...cronRun, event: 'schedule', status: 'in_progress', conclusion: null }]
-  assert.equal(repeatedRun({ run: cronRun, runs, slot, ok: true })?.id, 10)
-  // The dispatch failed (a real failure, which already emailed) and the cron failed too.
-  assert.equal(repeatedRun({ run: cronRun, runs: [slotRun({ conclusion: 'failure' })], slot, ok: false })?.id, 10)
+  assert.deepEqual(repeatCandidates({ run: cronRun, runs, slot, ok: true }).map((r) => r.id), [10])
+  // The dispatch failed and the cron failed too (whether the dispatch emailed is decide's question).
+  assert.deepEqual(repeatCandidates({ run: cronRun, runs: [slotRun({ conclusion: 'failure' })], slot, ok: false }).map((r) => r.id), [10])
   // James's hand start in the slot counts too.
-  assert.equal(repeatedRun({ run: cronRun, runs: [slotRun({ event: 'workflow_dispatch', triggering_actor: { login: 'GilbertJames' } })], slot, ok: true })?.id, 10)
+  assert.deepEqual(repeatCandidates({ run: cronRun, runs: [slotRun({ event: 'workflow_dispatch', triggering_actor: { login: 'GilbertJames' } })], slot, ok: true }).map((r) => r.id), [10])
+  const two = [slotRun(), slotRun({ id: 9, created_at: '2026-11-24T12:00:00Z', event: 'workflow_dispatch' })]
+  assert.deepEqual(repeatCandidates({ run: cronRun, runs: two, slot, ok: true }).map((r) => r.id), [9, 10])
 })
 
-test("repeatedRun: a new commit, another result, last week, an unfinished or skipped run, or a stranger's dispatch is no repeat", () => {
+test("repeatCandidates: a new commit, another result, last week, an unfinished or skipped run, or a stranger's dispatch is no repeat", () => {
   const slot = new Date('2026-11-24T09:37:00Z')
-  const none = (over, ok = true) => assert.equal(repeatedRun({ run: cronRun, runs: [slotRun(over)], slot, ok }), null, JSON.stringify(over))
+  const none = (over, ok = true) => assert.deepEqual(repeatCandidates({ run: cronRun, runs: [slotRun(over)], slot, ok }), [], JSON.stringify(over))
   none({ head_sha: 'b'.repeat(40) })
   none({ conclusion: 'failure' })
   none({}, false)
@@ -210,22 +213,35 @@ test("repeatedRun: a new commit, another result, last week, an unfinished or ski
   none({ id: 11 })
 })
 
-test('decide: only a cron run is looked up; it finds the slot from the cron and the runs since', async () => {
+const notifyJob = (conclusion, name = 'release / notify') => ({ name, steps: [{ name: 'Decide whether to email', conclusion: 'success' }, { name: 'Email ops@', conclusion }] })
+
+test("emailed: only a notify job whose 'Email ops@' step succeeded", () => {
+  assert.equal(emailed([{ name: 'release / verify', steps: [] }, notifyJob('success')]), true)
+  assert.equal(emailed([notifyJob('success', 'notify')]), true)
+  assert.equal(emailed([notifyJob('skipped')]), false)
+  assert.equal(emailed([notifyJob('failure')]), false)
+  assert.equal(emailed([{ name: 'release / verify', steps: [{ name: 'Email ops@', conclusion: 'success' }] }]), false)
+  assert.equal(emailed([]), false)
+  assert.equal(emailed(undefined), false)
+})
+
+test('decide: only a cron run is looked up; it finds the slot from the cron, the runs since, and whether that run emailed', async () => {
   const calls = []
-  const api = {
-    get: async (p) => (calls.push(p), cronRun),
+  const fake = (jobs) => ({
+    get: async (p) => (calls.push(p), p.includes('/jobs') ? { jobs } : cronRun),
     all: async (p, pick) => (calls.push(p), pick({ workflow_runs: [slotRun(), { ...cronRun, event: 'schedule' }] })),
-  }
+  })
   const env = { EVENT: 'schedule', SCHEDULE: '37 9 * * 2', REPO: 'CoderizeHQ/gate-test-web', RUN_ID: '11', HOLD: '', RESULTS: 'verify=success,publish=success' }
-  const d = await decide(env, api)
+  const d = await decide(env, fake([notifyJob('success')]))
   assert.equal(d.send, false)
   assert.match(d.why, /repeated run 10/)
   assert.deepEqual(calls, [
     '/repos/CoderizeHQ/gate-test-web/actions/runs/11',
     '/repos/CoderizeHQ/gate-test-web/actions/workflows/77/runs?branch=main&created=%3E%3D2026-11-24T09%3A37%3A00.000Z',
+    '/repos/CoderizeHQ/gate-test-web/actions/runs/10/jobs?filter=latest&per_page=100',
   ])
   // The cron's publish failed where the dispatch succeeded: that is news, so it emails.
-  assert.equal((await decide({ ...env, RESULTS: 'verify=success,publish=failure' }, api)).send, true)
+  assert.equal((await decide({ ...env, RESULTS: 'verify=success,publish=failure' }, fake([notifyJob('success')]))).send, true)
   // Not a cron run, or a held weekly run: nothing to look up.
   const never = { get: async () => assert.fail('no lookup'), all: async () => assert.fail('no lookup') }
   assert.equal((await decide({ ...env, EVENT: 'repository_dispatch', DISPATCH: 'weekly-dependency-release', SENDER: 'coderizehq-release[bot]' }, never)).send, true)
@@ -233,6 +249,20 @@ test('decide: only a cron run is looked up; it finds the slot from the cron and 
   assert.equal((await decide({ ...env, EVENT: 'push' }, never)).send, true)
   // A cron that isn't weekly is never a repeat.
   assert.equal((await decide({ ...env, SCHEDULE: '*/5 * * * *' }, { ...never, get: async () => cronRun })).send, true)
+})
+
+test('decide: a cron run failing after a held dispatch (which emailed nothing) still emails its real failure', async () => {
+  const held = { name: 'release / notify', steps: [{ name: 'Decide whether to email', conclusion: 'success' }, { name: 'Email ops@', conclusion: 'skipped' }] }
+  const api = {
+    get: async (p) => (p.includes('/jobs') ? { jobs: [{ name: 'release / verify', conclusion: 'failure', steps: [] }, held] } : cronRun),
+    all: async (p, pick) => pick({ workflow_runs: [slotRun({ conclusion: 'failure' })] }),
+  }
+  // An API error in verify, so not a hold: same commit, same failure conclusion as the held dispatch.
+  const env = { EVENT: 'schedule', SCHEDULE: '37 9 * * 2', REPO: 'CoderizeHQ/gate-test-web', RUN_ID: '11', HOLD: '', RESULTS: 'verify=failure,publish=skipped' }
+  const d = await decide(env, api)
+  assert.equal(d.send, true)
+  // A hold on that cron run is still silent (the digest has it).
+  assert.equal((await decide({ ...env, HOLD: 'true' }, api)).send, false)
 })
 
 test("release.yml's notify decides before any AWS, and installs, assumes the role and sends only when it should", async () => {

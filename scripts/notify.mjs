@@ -125,14 +125,17 @@ function isEarlierWeekly(r) {
  * The run a cron run repeats, or null: an earlier run of the same release workflow on main in the same weekly slot,
  * finished, for the same commit, that ended as this one did. GitHub's cron stays in each site's release.yml as a
  * backup and often fires hours after platform's dispatch already ran the week's release; that dispatch's email said
- * it all. A different commit (something merged in between) or a different outcome still emails.
+ * it all. A different commit (something merged in between) or a different outcome still emails. These are only
+ * candidates: decide counts one as repeated only if its own notify really emailed (`emailed`), so a cron run that fails
+ * after a held dispatch (which emailed nothing) still emails its failure.
  * @param {{ run: { id: number, created_at: string, head_sha: string }, runs: any[], slot: Date, ok: boolean }} f
+ * @returns {any[]} newest first
  */
-export function repeatedRun({ run, runs, slot, ok }) {
+export function repeatCandidates({ run, runs, slot, ok }) {
   const created = Date.parse(run.created_at)
   const want = ok ? 'success' : 'failure'
-  return (
-    runs.find(
+  return runs
+    .filter(
       (r) =>
         r.id !== run.id &&
         (r.head_branch ?? 'main') === 'main' &&
@@ -142,7 +145,14 @@ export function repeatedRun({ run, runs, slot, ok }) {
         r.status === 'completed' &&
         r.conclusion === want &&
         isEarlierWeekly(r),
-    ) ?? null
+    )
+    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+}
+
+/** Whether a release run's jobs show its notify emailed ops@: the `Email ops@` step of its notify job succeeded. */
+export function emailed(jobs) {
+  return (jobs ?? []).some(
+    (j) => (j.name === 'notify' || j.name?.endsWith(' / notify')) && (j.steps ?? []).some((s) => s.name === 'Email ops@' && s.conclusion === 'success'),
   )
 }
 
@@ -161,8 +171,8 @@ export function shouldEmail({ event, dispatch, sender, hold, repeated = null }) 
 }
 
 /**
- * Reads what shouldEmail needs from GitHub: only a cron run is looked up (its run, and the release workflow's runs on
- * main since its slot). `api` is lib/github.mjs's gh and ghAll, bound to the token.
+ * Reads what shouldEmail needs from GitHub: only a cron run is looked up (its run, the release workflow's runs on main
+ * since its slot, and each candidate's jobs). `api` is lib/github.mjs's gh and ghAll, bound to the token.
  */
 export async function decide(env, api) {
   const base = { event: env.EVENT, dispatch: env.DISPATCH, sender: env.SENDER, hold: env.HOLD }
@@ -176,7 +186,11 @@ export async function decide(env, api) {
     (p) => p?.workflow_runs ?? [],
   )
   const ok = !parseResults(env.RESULTS).some((j) => BAD.has(j.result))
-  return shouldEmail({ ...base, repeated: repeatedRun({ run, runs, slot, ok }) })
+  for (const earlier of repeatCandidates({ run, runs, slot, ok })) {
+    const jobs = (await api.get(`/repos/${env.REPO}/actions/runs/${earlier.id}/jobs?filter=latest&per_page=100`))?.jobs ?? []
+    if (emailed(jobs)) return shouldEmail({ ...base, repeated: earlier })
+  }
+  return first
 }
 
 /** Sends `message(run)` to ops@ with `mailer` (lib/aws.mjs's awsMailer, or a fake). */

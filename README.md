@@ -361,9 +361,11 @@ Release's `notify` sends nothing in two cases (James, C2719 c), decided by `noti
   `scripts/release.mjs`). The run still fails in verify, with the reasons as errors and a "Held for James" summary, so
   main's release shows it isn't released and platform's dispatcher still counts it as the week's run. A hand-started
   run (`workflow_dispatch`) still emails its hold.
-- **A repeat.** A run of the site's backup cron that comes after a weekly run in the same slot (the cron's last
-  Tuesday 09:37 UTC, read from `github.event.schedule`) for the same commit, which ended the same way. That run already
-  emailed. A cron run for a newer commit, or one that ends differently (a publish that fails this time), emails.
+- **A repeat.** A run of the site's backup cron that comes after a run in the same slot (the cron's last Tuesday 09:37
+  UTC, read from `github.event.schedule`) by the cron, a hand start or platform's dispatch as the release App, for the
+  same commit, which ended the same way and whose own `Email ops@` step succeeded. A cron run for a newer commit, one
+  that ends differently (a publish that fails this time), or one after a run that emailed nothing (a hold, then a
+  real failure on the cron) emails.
 
 Every other failure emails as before: a publish error, any refusal that isn't a hold, and a job that fails outright.
 If the decide step can't read the runs, it emails.
