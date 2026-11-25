@@ -6,7 +6,22 @@ import { test } from 'node:test'
 import { manifestKey, PREVIEW_BUCKET, storedKey } from './lib/build.mjs'
 import { hashes } from './lib/files.mjs'
 import { memoryStore } from './lib/memoryStore.mjs'
-import { checkLiveSite, contentRefusal, deploymentEnvironment, deploymentPayload, describe, findLive, goLiveRefusal, isSiteHost, KINDS, publishLive, robotsProblems, verify } from './release.mjs'
+import {
+  checkLiveSite,
+  contentRefusal,
+  deploymentEnvironment,
+  deploymentPayload,
+  describe,
+  findLive,
+  goLiveRefusal,
+  HOLD_MARKER,
+  holdLine,
+  isSiteHost,
+  KINDS,
+  publishLive,
+  robotsProblems,
+  verify,
+} from './release.mjs'
 
 const site = 'sbmcdn-com'
 const domain = 'sbmcdn.com'
@@ -71,6 +86,40 @@ test('verify: main publishes a clean dependency gap, refuses a dirty one, and sk
   assert.match(r.reasons.at(-1), /left for James/)
   const empty = stub(null, { ok: true, nothing: true, reasons: [], prs: [] })
   assert.equal((await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: empty })).nothing, true)
+})
+
+test('verify: a refused dependency gap is a hold for James, naming the last release; the decision is unchanged', async () => {
+  const dirty = stub(null, { ok: false, nothing: false, reasons: ['#9 was not opened by Renovate'], prs: [9], base: { sha: '4'.repeat(40), tag: 'v1.4.2' } })
+  assert.deepEqual(await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: dirty }), {
+    publish: false,
+    hold: true,
+    base: 'v1.4.2',
+    reasons: ['#9 was not opened by Renovate', 'dependency-only release left for James'],
+  })
+  // No release yet: still a hold, with no base.
+  const first = stub(null, { ok: false, nothing: false, reasons: ['no earlier release by the release App: the first release must be a version tag'], prs: [], base: null })
+  assert.equal((await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: first })).base, null)
+  // Nothing else is a hold: a clean or empty gap, a refused tag, a bad dispatch, a refused refresh.
+  const clean = stub({ ok: false, reasons: ['not a release'], sha: commit }, { ok: true, nothing: false, reasons: [], prs: [7] })
+  assert.equal((await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: clean })).hold, undefined)
+  assert.equal((await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, checks: stub(null, { ok: true, nothing: true, reasons: [], prs: [] }) })).hold, undefined)
+  assert.equal((await verify({ token: 't', repo, ref: 'refs/tags/v1.2.3', sha: commit, checks: clean })).hold, undefined)
+  assert.equal((await verify({ token: 't', repo, ref: 'refs/heads/feature/x', sha: commit, checks: clean })).hold, undefined)
+  const goLiveElse = await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, event: 'repository_dispatch', dispatch: 'go-live-release', sender: 'someone', site, payloadSite: site, checks: clean })
+  assert.equal(goLiveElse.publish, false)
+  assert.equal(goLiveElse.hold, undefined)
+  const refresh = await verify({ token: 't', repo, ref: 'refs/heads/main', sha: commit, refresh: true, refreshResults: 'build=failure,store=skipped', checks: clean })
+  assert.equal(refresh.publish, false)
+  assert.equal(refresh.hold, undefined)
+})
+
+test("a hold's marker is one line the weekly digest can find, never a workflow command", () => {
+  const line = holdLine({ reasons: ['#9 was not opened by Renovate', '::error::x\ny', 'dependency-only release left for James'], base: 'v1.4.2' })
+  assert.equal(HOLD_MARKER, 'release-hold: ')
+  assert.ok(line.startsWith(HOLD_MARKER))
+  assert.doesNotMatch(line, /\n/)
+  assert.deepEqual(JSON.parse(line.slice(HOLD_MARKER.length)), { reasons: ['#9 was not opened by Renovate', '::error::x\ny', 'dependency-only release left for James'], base: 'v1.4.2' })
+  assert.equal(holdLine({ reasons: ['r'] }), 'release-hold: {"reasons":["r"],"base":null}')
 })
 
 test('publish: copies the stored build to live, deletes the rest, checks it, clears the cache', async () => {

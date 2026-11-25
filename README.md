@@ -209,8 +209,9 @@ still names the run's own commit, which the deploy role trusts as before.
      it): its robots.txt must instead disallow every crawler and name no sitemap, and no sitemap is fetched;
    - marks the deployment successful, or failed with the reason.
 3. `notify`: emails ops@coderize.dev when `publish` succeeded, or when `verify` or `publish` failed (a refusal
-   included, with its reasons). Nothing is sent when there was nothing to publish, or for a run on a ref release can
-   never take (neither a version tag nor main).
+   included, with its reasons). Nothing is sent when there was nothing to publish, for a run on a ref release can
+   never take (neither a version tag nor main), for a weekly dependency run held for James (platform's weekly digest
+   lists it), or for a backup cron run repeating the week's run (Notifications).
 
 ### Government sites
 
@@ -348,6 +349,26 @@ the workflows. platform's `aws/live/notify.tf` makes that role: it trusts only `
 at `v1`/`v1.*`, from a site repo (by id, from the site records) on main or a version tag, and may only call
 `ses:SendEmail` from that address to that one recipient. The email is plain text: the site, ref, commit, each job's
 result, the live URL and approval for a release, a refusal's reasons, and the run's link.
+
+Release's `notify` sends nothing in two cases (James, C2719 c), decided by `notify.mjs decide` before any AWS:
+
+- **A hold.** The weekly dependency run (GitHub's cron, or platform's `weekly-dependency-release` dispatch as the
+  release App) refused only because the gap is left for James: verify's `hold` output. A hold isn't an error, and one
+  platform sync of `release.yml` holds every site at once (21 sites, about 50 emails on 2026-11-24). Platform's weekly
+  digest lists every held site in one email instead (its `scripts/siteReleases.mjs`, release-bootstrap's
+  `site-releases` and `release-digest` jobs), with the reasons, since when, and whether a release PR is open; it finds
+  each hold by the line `release-hold: {"reasons":[…],"base":"vX.Y.Z"}` that verify prints (`HOLD_MARKER` in
+  `scripts/release.mjs`). The run still fails in verify, with the reasons as errors and a "Held for James" summary, so
+  main's release shows it isn't released and platform's dispatcher still counts it as the week's run. A hand-started
+  run (`workflow_dispatch`) still emails its hold.
+- **A repeat.** A run of the site's backup cron that comes after a run in the same slot (the cron's last Tuesday 09:37
+  UTC, read from `github.event.schedule`) by the cron, a hand start or platform's dispatch as the release App, for the
+  same commit, which ended the same way and whose own `Email ops@` step succeeded. A cron run for a newer commit, one
+  that ends differently (a publish that fails this time), or one after a run that emailed nothing (a hold, then a
+  real failure on the cron) emails.
+
+Every other failure emails as before: a publish error, any refusal that isn't a hold, and a job that fails outright.
+If the decide step can't read the runs, it emails.
 
 ## Versions: releases, the canary and `v1`
 

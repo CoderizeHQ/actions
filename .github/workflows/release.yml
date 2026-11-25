@@ -113,6 +113,7 @@ jobs:
       approver: ${{ steps.verify.outputs.approver }}
       dependency-prs: ${{ steps.verify.outputs.dependency-prs }}
       reasons: ${{ steps.verify.outputs.reasons }}
+      hold: ${{ steps.verify.outputs.hold }}
       workflow-sha: ${{ steps.self.outputs.sha }}
     steps:
       # The name goes into role ARNs and S3 paths; coderizehq-preview-deploy-<site> must fit IAM's 64-character limit.
@@ -263,7 +264,9 @@ jobs:
 
   # Emails ops@coderize.dev when a release publishes, and when it fails or is refused (email only, C955 a). Nothing is
   # sent when there was nothing to publish, or for a hand-started run on a ref the release can never take (neither a
-  # version tag nor main), which coderizehq-notify-send doesn't trust. That role (live account) may only send from
+  # version tag nor main), which coderizehq-notify-send doesn't trust. Nor for a weekly dependency run held for James
+  # (verify's `hold`: the run still fails, and platform's weekly digest lists it), nor for a cron run repeating this
+  # week's run (the decide step). That role (live account) may only send from
   # notify@notify.coderize.dev to ops@ with the coderizehq-notify configuration set, and trusts only this file and
   # deploy-preview.yml at v1 or v1.*; its ARN is fixed here, never an input.
   notify:
@@ -303,15 +306,36 @@ jobs:
           install: false
           working-directory: actions
 
+      # No AWS, no packages. A weekly run held for James emails nothing (platform's weekly digest lists every held
+      # site), nor does GitHub's backup cron when it repeats, for the same commit and with the same result, a run
+      # this week's slot already had (scripts/notify.mjs shouldEmail). Anything else emails as before; so does a
+      # lookup that fails.
+      - name: Decide whether to email
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT: ${{ github.event_name }}
+          DISPATCH: ${{ github.event.action }}
+          SENDER: ${{ github.event.sender.login }}
+          SCHEDULE: ${{ github.event.schedule }}
+          HOLD: ${{ needs.verify.outputs.hold }}
+          RESULTS: verify=${{ needs.verify.result }},publish=${{ needs.publish.result }}
+        run: node actions/scripts/notify.mjs decide
+
       - run: pnpm install --frozen-lockfile
+        if: steps.decide.outputs.send == 'true'
         working-directory: actions
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: steps.decide.outputs.send == 'true'
         with:
           role-to-assume: arn:aws:iam::243891826043:role/coderizehq-notify-send
           aws-region: us-east-1
 
       - name: Email ops@
+        if: steps.decide.outputs.send == 'true'
         env:
           WORKFLOW: release
           SITE: ${{ inputs.site }}
