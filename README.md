@@ -60,7 +60,7 @@ required workflow that isn't there blocks every PR it covers.
 | `refresh-build.yml` | a site's refresh and release workflows (Data refreshes) | `site`, `package` (empty), `build-dir` (`dist`), `commit`, `environment`, `secret-names`; output `lockfile-sha256`; `secrets: inherit` | `contents: read` | None: no AWS (no `id-token`), stores nothing. The only job a site's feed secrets reach, from its refresh environment, and only its build step |
 | `build-app-image.yml` | an app repo, every PR and push to main | `app`, `package`, `entry` | `contents: read`, `actions: read`, `id-token: write` | Builds the app's linux/arm64 image without Docker (crane on a pinned Node base); on main, `coderizehq-app-build-<app>` pushes it to ECR tagged with the commit. That role trusts only this file at `v1`/`v1.*`, from the app repo's main (platform `docs/apps.md`) |
 | `deploy-app.yml` | an app repo, version tag or main | `app` | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-app-deploy-<app>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; it may only run the app's own deploy document on the app server, read and tag its own ECR repository, and find the server |
-| `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
+| `ci-tofu.yml` | `platform-checks.yml` | `roots` (platform's four, `cloudflare/ai` planned offline, `aws/live` planned at `-parallelism=30`); secrets `CLOUDFLARE_READ_TOKEN`, `PLATFORM_READ_APP_KEY` and the caller's variable `PLATFORM_READ_APP_CLIENT_ID` (all optional) | `contents: read`, `actions: read`, `id-token: write`, `pull-requests: write` | `coderizehq-infra-plan` in each account trusts only this file at `v1`/`v1.*`, from platform's PRs; it reads state and never writes or locks it |
 
 Role ARNs are always derived from `site` (`arn:aws:iam::798070830797:role/coderizehq-preview-deploy-<site>`,
 `arn:aws:iam::243891826043:role/coderizehq-live-publish-<site>`), and for a government site from `account` too
@@ -426,6 +426,14 @@ any other `GetRole` error fails the job.
 `state`) and the root's own account's for its resources (profile `account`), `tofu plan -lock=false`. A root whose
 provider needs a token the caller didn't pass (Cloudflare, GitHub) is skipped and says so. `comment`: one PR comment
 with every plan, updated on each push.
+
+A root's `"parallelism"` sets how many resources its plan refreshes at once (`-parallelism`, 1 to 50; OpenTofu's
+default of 10 without it). aws/live's is 30, as in its plan in platform's `apply.yml` (platform #375): its refresh reads
+about 1,540 resources and is mostly waiting, and its PR plan took 3m10s to 4m36s at 10. A plan only reads, so 30 is
+safe on the plan role's read APIs: S3 and IAM don't throttle at it, and the provider's retries absorb CloudFront's and
+CloudWatch's bursts. The other roots keep 10. The key is in the matrix, so aws/live's check is named
+`ci / plan (aws/live, 243891826043, 30)`; no ruleset requires a plan check by name (platform's requires the
+workflow).
 
 ### axe
 
