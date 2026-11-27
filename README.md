@@ -52,7 +52,7 @@ required workflow that isn't there blocks every PR it covers.
 | `site-checks.yml` | the `sites` ruleset, every site PR | none (a ruleset workflow takes none) | (sets its own) | Calls `ci-site` and `axe`; skips itself on this repo's own PRs |
 | `platform-checks.yml` | the `platform` ruleset, every platform PR | none | (sets its own) | Calls `ci-tofu` with platform's two read-only secrets, by name |
 | `ci-site.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `indexed` (`true`) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("ci / ci-site"). Lockfile changes without package.json pass only for Renovate's App on `renovate/**` |
-| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
+| `ci-node.yml` | a Node repo's ci.yml (this repo's own `ci.yml`, by path) | `test-database` (`false`), `go-version-file` (empty) | `contents: read`, `actions: read` | None: no AWS, no secrets. `test-database` uses a CI-only Postgres with no password |
 | `axe.yml` | `site-checks.yml`; platform's `app-checks.yml` per package site | `build-dir` (`dist`), `package` (empty), `min-pages` (1), `pages-per-template` (3; 0 scans every page) | `contents: read`, `actions: read` | Required by the `sites` ruleset ("axe / axe"). No AWS, no secrets. Runs the PR's code |
 | `deploy-preview.yml` | site, push to main; a site's rebuild workflow (Content rebuilds); a site's refresh and release workflows (Data refreshes) | `site`, `build-dir` (`dist`), `package` (empty), `max-delete-share` (`0.25`), `rebuild-commit` (empty; the rebuild and refresh workflows only), `refresh-lockfile-sha256` (empty; a data refresh's store only), `account` (`live`; `government` for a government site) | `contents: read`, `actions: read`, `id-token: write` | `coderizehq-preview-deploy-<site>` trusts only this file at `v1`/`v1.*`, from the site repo's main, and (for a refresh site's release storing its refresh) its version tags; `notify` uses `coderizehq-notify-send` (Notifications) |
 | `release.yml` | site, version tag or weekly on main; a site's rebuild and refresh workflows | `site`, `max-delete-share` (`0.25`), `deployment` (`live`), `check-only`, `refresh` (`false`), `refresh-results` (empty), `account` (`live`; `government` for a government site); outputs `publish`, `commit`, `refreshable` | `contents: read`, `pull-requests: read`, `checks: read`, `statuses: read`, `actions: read`, `deployments: write`, `id-token: write` | `coderizehq-live-publish-<site>` trusts only this file at `v1`/`v1.*`, in the `release` environment, from a version tag or main; `notify` uses `coderizehq-notify-send` |
@@ -100,9 +100,27 @@ In this order, so nothing from the site runs before the checks on its committed 
 
 ### ci-node
 
-The PR title, gitleaks, the audit (all as in ci-site), then install, ESLint (with a config) and tests (with a test
-script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of it, and their titles are
-Conventional Commits too (Release Please reads them).
+The PR title, gitleaks, the audit (all as in ci-site), then Go (only with `go-version-file`), install, ESLint (with a
+config) and tests (with a test script). This repo's own `ci.yml` calls it by path, so its PRs run their own version of
+it, and their titles are Conventional Commits too (Release Please reads them).
+
+With `go-version-file` (a repo with Go in it, such as a Go desktop app wrapped by a package.json so turbo runs
+`go build`, `go test`, `go vet`, gofmt and govulncheck through the repo's own scripts), the job sets up Go before the
+install, so the install, ESLint and tests all have `go` on the PATH:
+
+```yaml
+    uses: CoderizeHQ/actions/.github/workflows/ci-node.yml@v1
+    with:
+      go-version-file: apps/desktop/go.mod
+```
+
+- **The input** is the go.mod's path from the repo root. It must be a relative path ending in `/go.mod` (or just
+  `go.mod`), with no `..`, no leading `/` and no hidden folder, and the file must be there; anything else fails the job
+  before setup-go reads it.
+- **The version** comes from the go.mod's `go` and `toolchain` lines, through `actions/setup-go` (pinned to a commit).
+- **The cache** is setup-go's own: the module and build caches, keyed on the `go.sum` beside the go.mod, and off when
+  there is none. Nothing is skipped on a cache hit; the cache only saves downloads.
+- **Empty** (the default), neither Go step runs, and the job and its check (`ci / ci-node`) are as before.
 
 With `test-database: true` (an API whose tests need Postgres; STANDARDS.md 6), the job makes an empty database for
 itself just before the tests and drops it after them, whatever happened (`scripts/testDatabase.mjs`):
@@ -477,5 +495,7 @@ says how many pages were built and how many scanned, with a row per sampled fami
   `PLATFORM_READ_APP_KEY` secrets and `PLATFORM_READ_APP_CLIENT_ID` variable (platform's README says what they are);
   until then those plans are skipped.
 - ci-site's workflow standards check (each repo's files against the template) comes with the template in Phase 4.
+- ci-node's Go steps (`go-version-file`) don't run in this repo's own CI, which has no Go: `scripts/ciNode.test.mjs`
+  checks their shape, their gate and the input check, and the first Go repo's PR is their first real run.
 - The runner VM (Phase 3): jobs need `gh`, `jq`, `curl`, `unzip` and, for axe, Playwright's system packages
   (`playwright install --with-deps`, which needs root) on its image; ci-tofu's `trust` job also needs the AWS CLI.
