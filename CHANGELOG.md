@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/CoderizeHQ/actions/compare/v1.13.1...v1.14.0) (2026-11-27)
+
+
+### Features
+
+* set up go in ci-node when go-version-file names a go.mod ([#66](https://github.com/CoderizeHQ/actions/issues/66)) ([fba02d0](https://github.com/CoderizeHQ/actions/commit/fba02d06b41b3a155eb0f1378b2c2569eeb07927))
+
 ## [1.13.1](https://github.com/CoderizeHQ/actions/compare/v1.13.0...v1.13.1) (2026-11-27)
 
 
