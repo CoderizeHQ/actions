@@ -16,10 +16,13 @@ name: ci-tofu
 on:
   workflow_call:
     inputs:
+      # aws/live's plan refreshes about 1,540 resources and is mostly waiting on reads, so it runs 30 at a time, as its
+      # plan in platform's apply.yml does (platform #375). A plan only reads: S3 and IAM don't throttle at 30, and the
+      # provider's retries absorb CloudFront's and CloudWatch's bursts. Every other root keeps OpenTofu's default of 10.
       roots:
-        description: JSON list of the OpenTofu roots, each with the account its resources live in, and "offline":true for a root planned against its last applied state with no provider credentials
+        description: JSON list of the OpenTofu roots, each with the account its resources live in, "offline":true for a root planned against its last applied state with no provider credentials, and optionally "parallelism":N for how many resources its plan refreshes at once (default 10, OpenTofu's)
         type: string
-        default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043"},{"root":"aws/preview","account":"798070830797"},{"root":"cloudflare/ai","account":"243891826043","offline":true}]'
+        default: '[{"root":"tofu","account":"243891826043"},{"root":"aws/live","account":"243891826043","parallelism":30},{"root":"aws/preview","account":"798070830797"},{"root":"cloudflare/ai","account":"243891826043","offline":true}]'
     # Named like the caller's repository secrets, so a caller can pass them one by one or with `secrets: inherit`.
     # The read App's client id is the caller's PLATFORM_READ_APP_CLIENT_ID variable.
     secrets:
@@ -202,6 +205,8 @@ jobs:
       AWS_PROFILE: account
       ROOT: ${{ matrix.root.root }}
       OFFLINE: ${{ matrix.root.offline == true }}
+      # As JSON, so a root without the key ("null") stays apart from one that sets a bad value (0, "30", false).
+      PARALLELISM: ${{ toJSON(matrix.root.parallelism) }}
       HAS_READ_APP: ${{ secrets.PLATFORM_READ_APP_KEY != '' && vars.PLATFORM_READ_APP_CLIENT_ID != '' }}
     steps:
       # Written first, so the comment says so if the job dies before planning.
@@ -250,7 +255,9 @@ jobs:
           owner: CoderizeHQ
 
       # The plan role denies every state write, the lock file included, hence -lock=false. A root whose provider
-      # needs a token it wasn't given is skipped rather than failed, and the comment says why.
+      # needs a token it wasn't given is skipped rather than failed, and the comment says why. The root's
+      # "parallelism" applies to the plan's refresh: OpenTofu's 10 when the root doesn't set one, and anything set that
+      # isn't a JSON whole number from 1 to 50 fails the plan rather than quietly running at 10.
       - name: tofu plan
         working-directory: ${{ matrix.root.root }}
         env:
@@ -264,6 +271,11 @@ jobs:
             echo "::notice::$ROOT: plan skipped: $1"
             exit 0
           }
+          if [ "$PARALLELISM" = null ]; then PARALLELISM=10; fi
+          if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]?$ ]] || (( PARALLELISM > 50 )); then
+            echo "::error::$ROOT: parallelism must be a whole number from 1 to 50, got '$PARALLELISM'"
+            exit 1
+          fi
           # A read-only App can't read org rulesets (403) or repositories' merge settings (they need contents write),
           # so a root with the github provider plans against its last applied state instead of live GitHub: exactly
           # what the PR changes. Hand-made changes to GitHub settings show in the plan apply.yml runs on every merge.
@@ -290,7 +302,7 @@ jobs:
           set +e
           {
             "$RUNNER_TEMP/bin/tofu" init -input=false -no-color &&
-            "$RUNNER_TEMP/bin/tofu" plan -input=false -no-color -lock=false "${refresh[@]}"
+            "$RUNNER_TEMP/bin/tofu" plan -input=false -no-color -lock=false -parallelism="$PARALLELISM" "${refresh[@]}"
           } > "$RESULT_DIR/plan.txt" 2>&1
           code=$?
           set -e
