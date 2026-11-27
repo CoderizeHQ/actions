@@ -205,7 +205,8 @@ jobs:
       AWS_PROFILE: account
       ROOT: ${{ matrix.root.root }}
       OFFLINE: ${{ matrix.root.offline == true }}
-      PARALLELISM: ${{ matrix.root.parallelism || 10 }}
+      # As JSON, so a root without the key ("null") stays apart from one that sets a bad value (0, "30", false).
+      PARALLELISM: ${{ toJSON(matrix.root.parallelism) }}
       HAS_READ_APP: ${{ secrets.PLATFORM_READ_APP_KEY != '' && vars.PLATFORM_READ_APP_CLIENT_ID != '' }}
     steps:
       # Written first, so the comment says so if the job dies before planning.
@@ -255,7 +256,8 @@ jobs:
 
       # The plan role denies every state write, the lock file included, hence -lock=false. A root whose provider
       # needs a token it wasn't given is skipped rather than failed, and the comment says why. The root's
-      # "parallelism" (default 10) applies to the plan's refresh; anything but a whole number from 1 to 50 fails.
+      # "parallelism" applies to the plan's refresh: OpenTofu's 10 when the root doesn't set one, and anything set that
+      # isn't a JSON whole number from 1 to 50 fails the plan rather than quietly running at 10.
       - name: tofu plan
         working-directory: ${{ matrix.root.root }}
         env:
@@ -269,6 +271,7 @@ jobs:
             echo "::notice::$ROOT: plan skipped: $1"
             exit 0
           }
+          if [ "$PARALLELISM" = null ]; then PARALLELISM=10; fi
           if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]?$ ]] || (( PARALLELISM > 50 )); then
             echo "::error::$ROOT: parallelism must be a whole number from 1 to 50, got '$PARALLELISM'"
             exit 1

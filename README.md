@@ -427,8 +427,9 @@ any other `GetRole` error fails the job.
 provider needs a token the caller didn't pass (Cloudflare, GitHub) is skipped and says so. `comment`: one PR comment
 with every plan, updated on each push.
 
-A root's `"parallelism"` sets how many resources its plan refreshes at once (`-parallelism`, 1 to 50; OpenTofu's
-default of 10 without it). aws/live's is 30, as in its plan in platform's `apply.yml` (platform #375): its refresh reads
+A root's `"parallelism"` sets how many resources its plan refreshes at once (`-parallelism`; OpenTofu's default of 10
+without it). A value that isn't a JSON whole number from 1 to 50 (`0`, `"30"`, `false`) fails that root's plan
+rather than quietly running at 10. aws/live's is 30, as in its plan in platform's `apply.yml` (platform #375): its refresh reads
 about 1,540 resources and is mostly waiting, and its PR plan took 3m10s to 4m36s at 10. A plan only reads, so 30 is
 safe on the plan role's read APIs: S3 and IAM don't throttle at it, and the provider's retries absorb CloudFront's and
 CloudWatch's bursts. The other roots keep 10. The key is in the matrix, so aws/live's check is named
