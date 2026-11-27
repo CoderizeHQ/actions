@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.1](https://github.com/CoderizeHQ/actions/compare/v1.13.0...v1.13.1) (2026-11-27)
+
+
+### Performance Improvements
+
+* plan aws/live 30 resources at a time in ci-tofu ([#64](https://github.com/CoderizeHQ/actions/issues/64)) ([cdf87e7](https://github.com/CoderizeHQ/actions/commit/cdf87e7f0d3a8112b222f353800da7a7c981828a))
+
 ## [1.13.0](https://github.com/CoderizeHQ/actions/compare/v1.12.1...v1.13.0) (2026-11-25)
 
 
