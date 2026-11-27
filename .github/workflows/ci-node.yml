@@ -6,8 +6,9 @@ name: ci-node
 #   permissions: { contents: read, actions: read }
 # actions' own ci.yml calls it by path, so a change to these checks is tested on its own PR.
 #
-# The PR title, gitleaks over the full history and the dependency audit, then install, ESLint (where the repo has a
-# config) and tests (where package.json has a test script). The scripts come from this workflow's own commit.
+# The PR title, gitleaks over the full history and the dependency audit, then Go (only with go-version-file), install,
+# ESLint (where the repo has a config) and tests (where package.json has a test script). The scripts come from this
+# workflow's own commit.
 on:
   workflow_call:
     inputs:
@@ -21,6 +22,14 @@ on:
       test-database:
         type: boolean
         default: false
+      # A repo with Go in it (a Go app wrapped by a package.json, so turbo runs go build, go test, go vet, gofmt and
+      # govulncheck through the repo's scripts): the go.mod, relative to the repo root, whose `go` and `toolchain` lines
+      # pick the Go version. actions/setup-go puts it on the PATH before the install, ESLint and tests, and caches the
+      # module and build caches keyed on the go.sum beside it. Empty (the default), no Go step runs.
+      #   with: { go-version-file: apps/desktop/go.mod }
+      go-version-file:
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -100,6 +109,34 @@ jobs:
         env:
           REPO_DIR: repo
         run: node "${{ steps.self.outputs.scripts }}/scripts/auditCheck.mjs"
+
+      # Only with go-version-file. The path is checked before setup-go reads it: a go.mod inside the repo, by a relative
+      # path with no `..` and no hidden folder. The cache is keyed on the go.sum beside it, and is off when there is
+      # none (a module with no dependencies). Nothing is skipped on a cache hit: the cache only saves downloads.
+      - name: Check the Go input
+        id: go
+        if: inputs.go-version-file != ''
+        working-directory: repo
+        env:
+          GO_MOD: ${{ inputs.go-version-file }}
+        run: |
+          [[ "$GO_MOD" =~ ^([A-Za-z0-9_-][A-Za-z0-9_.-]*/)*go\.mod$ && "$GO_MOD" != /* && "$GO_MOD" != *..* ]] || {
+            echo "::error::go-version-file is a relative path to a go.mod in the repo (apps/desktop/go.mod), with no .. and no leading /"; exit 1;
+          }
+          [ -f "$GO_MOD" ] || { echo "::error::go-version-file: the repo has no $GO_MOD"; exit 1; }
+          dir=$(dirname "$GO_MOD")
+          if [ "$dir" = . ]; then sum=go.sum; else sum="$dir/go.sum"; fi
+          if [ -f "$sum" ]; then cache=true; else cache=false; fi
+          echo "go-sum=repo/$sum" >> "$GITHUB_OUTPUT"
+          echo "cache=$cache" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Go
+        if: inputs.go-version-file != ''
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: repo/${{ inputs.go-version-file }}
+          cache: ${{ steps.go.outputs.cache }}
+          cache-dependency-path: ${{ steps.go.outputs.go-sum }}
 
       - name: Install
         working-directory: repo
